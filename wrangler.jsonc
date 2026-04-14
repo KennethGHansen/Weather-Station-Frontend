@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wild-term-51a5",               // <- put your worker name here
+  "main": "worker.js",                    // <- we'll add this next
+  "compatibility_date": "2026-04-14",
+  "assets": {
+    "directory": "./",                    // repo root where index.html + app.js live
+    "binding": "ASSETS",
+    "run_worker_first": true
+  }
+}
