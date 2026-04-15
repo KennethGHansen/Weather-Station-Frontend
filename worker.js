@@ -1,5 +1,3 @@
-let latest = null;
-
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -7,34 +5,49 @@ function json(obj, status = 200) {
   });
 }
 
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
 
-	export default {
-	  async fetch(request, env, ctx) {
-		const url = new URL(request.url);
+    // ---------------------------------
+    // POST /api/weather (ESP → cloud)
+    // ---------------------------------
+    if (url.pathname === "/api/weather" && request.method === "POST") {
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return json({ error: "invalid json" }, 400);
+      }
 
-		if (url.pathname === "/api/weather" && request.method === "POST") {
-		  const payload = await request.json();   // ← your line
-		  latest = payload;                        // ← your line
-		  return Response.json({ ok: true });      // ← your line
-		}
+      let ts = payload.ts;
+      if (!ts || ts < 1_000_000_000) {
+        ts = Math.floor(Date.now() / 1000);
+      }
 
-		if (url.pathname === "/api/weather" && request.method === "GET") {
-		  if (!latest) {
-			return Response.json({ error: "no data yet" }, { status: 404 });
-		  }
-		  return Response.json(latest);
-		}
+      const record = {
+        ts,
+        device_id: payload.device_id ?? null,
+        boot_id: payload.boot_id ?? null,
+        weather: payload,
+      };
 
-		return new Response("Not found", { status: 404 });
-	  }
-	};
+      // Persist to KV (single source of truth)
+      await env.WEATHER_KV.put("latest", JSON.stringify(record));
 
+      return json({ ok: true });
+    }
 
     // ---------------------------------
     // GET /api/weather (UI → latest)
     // ---------------------------------
     if (url.pathname === "/api/weather" && request.method === "GET") {
-      if (!latest) return json({ error: "no data yet" }, 404);
+      const latest = await env.WEATHER_KV.get("latest", { type: "json" });
+
+      if (!latest) {
+        return json({ error: "no data yet" }, 404);
+      }
+
       return json(latest);
     }
 
@@ -46,7 +59,7 @@ function json(obj, status = 200) {
     }
 
     // ---------------------------------
-    // Everything else: let assets serve it
+    // Static assets
     // ---------------------------------
     return env.ASSETS.fetch(request);
   },
