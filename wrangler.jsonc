@@ -1,17 +1,38 @@
 {
-	"$schema": "./node_modules/wrangler/config-schema.json",
-	"name": "weather-station", // <- put your worker name here
-	"main": "worker.js", // <- we'll add this next
-	"compatibility_date": "2026-04-14",
-	"assets": {
-		"directory": "./", // repo root where index.html + app.js live
-		"binding": "ASSETS",
-		"run_worker_first": false
-	},
-	"kv_namespaces": [
-		{
-			"id": "acd6a77f01684e34bd57863bf27f4284",
-			"binding": "WEATHER_KV"
-		}
-	]
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "weather-station",
+  "main": "worker.js",
+  "compatibility_date": "2026-04-14",
+
+  "assets": {
+    "directory": "./",
+    "binding": "ASSETS",
+    "run_worker_first": false
+  },
+
+  // (Optional) keep KV binding for later/historical use, but we won't write to it anymore
+  "kv_namespaces": [
+    {
+      "id": "acd6a77f01684e34bd57863bf27f4284",
+      "binding": "WEATHER_KV"
+    }
+  ],
+
+  // ✅ NEW: Durable Object binding
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WEATHER_DO",
+        "class_name": "WeatherDO"
+      }
+    ]
+  },
+
+  // ✅ NEW: SQLite-backed DO migration (required for new SQLite-backed classes)
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["WeatherDO"]
+    }
+  ]
 }
