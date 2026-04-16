@@ -3,11 +3,82 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Weather Station</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 </head>
-<body>
-  <h2>Latest Weather</h2>
-  <pre id="weather">loading...</pre>
+
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+
+  <h2 class="text-2xl font-bold p-4 sm:p-6">
+    Latest Weather from my home in Højbjerg
+  </h2>
+
+  <div class="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+
+    <!-- Temperature -->
+    <div class="bg-slate-800 rounded-xl p-4">
+      <div class="text-sm text-slate-400">Temperature</div>
+      <div id="temp" class="text-3xl sm:text-4xl lg:text-5xl font-semibold">
+        -- °C
+      </div>
+      <div class="text-xs text-slate-500 mt-1 flex flex-col sm:flex-row sm:gap-2">
+        <span>Min <span id="temp-min">--</span></span>
+        <span>Max <span id="temp-max">--</span></span>
+      </div>
+    </div>
+
+    <!-- Humidity -->
+    <div class="bg-slate-800 rounded-xl p-4">
+      <div class="text-sm text-slate-400">Humidity</div>
+      <div id="humidity" class="text-3xl sm:text-4xl lg:text-5xl font-semibold">
+        -- %
+      </div>
+      <div class="text-xs text-slate-500 mt-1 flex flex-col sm:flex-row sm:gap-2">
+        <span>Min <span id="hum-min">--</span></span>
+        <span>Max <span id="hum-max">--</span></span>
+      </div>
+    </div>
+
+    <!-- Pressure -->
+    <div class="bg-slate-800 rounded-xl p-4">
+      <div class="text-sm text-slate-400">Sea‑level Pressure</div>
+      <div id="pressure" class="text-3xl sm:text-4xl lg:text-5xl font-semibold">
+        -- hPa
+      </div>
+      <div class="text-xs text-slate-500 mt-1 flex flex-col sm:flex-row sm:gap-2">
+        <span>Min <span id="press-min">--</span></span>
+        <span>Max <span id="press-max">--</span></span>
+      </div>
+    </div>
+
+    <!-- Forecast -->
+    <div class="bg-slate-800 rounded-xl p-4 col-span-1 sm:col-span-2">
+      <div class="text-sm text-slate-400">Forecast</div>
+      <div id="forecast" class="text-lg">--</div>
+    </div>
+
+    <!-- Trend -->
+    <div class="bg-slate-800 rounded-xl p-4">
+      <div class="text-sm text-slate-400">Trend</div>
+      <div id="trend" class="text-lg">--</div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="bg-slate-800 rounded-xl p-4">
+      <div class="text-sm text-slate-400">Alerts</div>
+      <div id="alert" class="text-lg text-amber-400">None</div>
+    </div>
+
+    <!-- Air Quality -->
+    <div class="bg-slate-800 rounded-xl p-4">
+      <div class="text-sm text-slate-400">Air Quality</div>
+      <div id="air-quality" class="text-lg">--</div>
+    </div>
+
+  </div>
 
   <script src="app.js"></script>
 </body>

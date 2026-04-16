@@ -1,37 +1,88 @@
-// IMPORTANT: In production (your Worker), use same-origin so CORS is not involved.
-const API_BASE = ""; // same origin
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
 
-async function load() {
-  try {
-    const r = await fetch(`${API_BASE}/api/weather?nocache=${Date.now()}`, {
-      cache: "no-store",
-    });
+// Small helper function that should solve the min/max value confusion (text or string)	
+function toNumber(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
 
-    // Fix A: 404 means "no data yet" (not a real error)
-    if (r.status === 404) {
-      let data = null;
-      try {
-        data = await r.json();
-      } catch (_) {
-        // ignore JSON parse errors
-      }
-      const msg = data?.error ? `Waiting: ${data.error}` : "Waiting for first reading...";
-      document.getElementById("weather").textContent = msg;
-      return;
-    }
+async function updateWeather() {
+  const res = await fetch("/api/weather", { cache: "no-store" });
+  const data = await res.json();
 
-    // Other non-OK statuses are real errors
-    if (!r.ok) {
-      document.getElementById("weather").textContent = `API error: HTTP ${r.status}`;
-      return;
-    }
+  const w = data?.weather;
+  if (!w) return;
 
-    const data = await r.json();
-    document.getElementById("weather").textContent = JSON.stringify(data, null, 2);
-  } catch (e) {
-    document.getElementById("weather").textContent = `Fetch failed: ${e.message}`;
+  // Temperature (works even if minmax/derived missing)
+  if (typeof w.temp === "number") {
+    setText("temp", w.temp.toFixed(1) + " °C");
+  } else if (typeof w.raw?.temperature_c === "number") {
+    setText("temp", w.raw.temperature_c.toFixed(1) + " °C");
+  }
+
+  // Humidity
+  if (typeof w.hum === "number") {
+    setText("humidity", w.hum.toFixed(1) + " %");
+  }
+
+  // Sea-level pressure (Pa → hPa)
+  if (typeof w.derived?.sea_level_pressure_pa === "number") {
+    setText("pressure", (w.derived.sea_level_pressure_pa / 100).toFixed(0) + " hPa");
+  } else if (typeof w.pressure === "number") {
+    // fallback if you prefer station pressure
+    setText("pressure", (w.pressure / 100).toFixed(1) + " hPa");
+  } else if (typeof w.raw?.pressure_pa === "number") {
+    setText("pressure", (w.raw.pressure_pa / 100).toFixed(1) + " hPa");
+  }
+
+  // Min / Max values (minmax may be missing on some samples)
+  const mm = w.minmax ?? w.derived?.minmax ?? null;
+
+  // Temperature min/max
+  const tmin = toNumber(mm?.temp_min_c);
+  if (tmin !== null) setText("temp-min", tmin.toFixed(1) + " °C");
+
+  const tmax = toNumber(mm?.temp_max_c);
+  if (tmax !== null) setText("temp-max", tmax.toFixed(1) + " °C");
+
+  // Humidity min/max (rh_min_pct / rh_max_pct)
+  const rhMin = toNumber(mm?.rh_min_pct);
+  if (rhMin !== null) setText("hum-min", rhMin.toFixed(1) + " %");
+
+  const rhMax = toNumber(mm?.rh_max_pct);
+  if (rhMax !== null) setText("hum-max", rhMax.toFixed(1) + " %");
+
+  // Pressure min/max (press_min_pa / press_max_pa) -> show in hPa, no decimals
+  const pMin = toNumber(mm?.press_min_pa);
+  if (pMin !== null) setText("press-min", (pMin).toFixed(0) + " hPa");
+
+  const pMax = toNumber(mm?.press_max_pa);
+  if (pMax !== null) setText("press-max", (pMax).toFixed(0) + " hPa");
+
+
+  // Forecast / Trend / Alert
+  if (typeof w.derived?.barometer_forecast === "string") {
+    setText("forecast", w.derived.barometer_forecast.trim());
+  }
+  if (typeof w.derived?.barometer_trend === "string") {
+    setText("trend", w.derived.barometer_trend.trim());
+  }
+  if (typeof w.derived?.barometer_storm === "string") {
+    setText("alert", w.derived.barometer_storm.trim());
+  }
+
+  // Air Quality text
+  if (typeof w.derived?.air_quality_text === "string") {
+    setText("air-quality", w.derived.air_quality_text.trim());
   }
 }
 
-load();
-setInterval(load, 5000);
+updateWeather();
+setInterval(updateWeather, 3000);
