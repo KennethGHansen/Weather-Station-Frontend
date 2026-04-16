@@ -19,6 +19,24 @@ async function updateWeather() {
 
   const w = data?.weather;
   if (!w) return;
+  
+  // ---- Station online/offline indicator ----
+  const now = Math.floor(Date.now() / 1000);
+  const lastTs = toNumber(data.ts ?? w.ts);
+
+  const dot = document.getElementById("station-dot");
+  const label = document.getElementById("station-status");
+
+  // consider station online if last update < 30 seconds ago
+  if (lastTs !== null && now - lastTs < 30) {
+    dot.className = "w-3 h-3 rounded-full bg-green-500";
+    label.textContent = "Weather‑Station Online";
+    label.className = "text-sm font-medium text-green-400";
+  } else {
+    dot.className = "w-3 h-3 rounded-full bg-red-500";
+    label.textContent = "Weather‑Station Offline";
+    label.className = "text-sm font-medium text-red-400";
+  }
 
   // Temperature (works even if minmax/derived missing)
   if (typeof w.temp === "number") {
