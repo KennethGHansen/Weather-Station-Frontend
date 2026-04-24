@@ -67,10 +67,12 @@
         <span>Min <span id="out-temp-min">--</span></span>
         <span>Max <span id="out-temp-max">--</span></span>
       </div>
-	  <div class="text-xs text-slate-500 mt-1 flex items-center gap-1">
-	     <span>Battery</span>
-	    <span id="shelly-batt">--- %</span>
+	  <!-- Battery (hidden by default, shown only when low) -->
+	  <div id="shelly-batt-row" class="hidden text-xs text-red-400 mt-1 flex items-center gap-1">
+		<span>Battery low:</span>
+		<span id="shelly-batt"></span>
 	  </div>
+
     </div>
 	</div>
 	</div>

@@ -144,22 +144,18 @@ async function updateWeather() {
       setText("out-humidity", sh.humidity_pct.toFixed(1) + " %");
     }
 	
-    //Battery
-    if (typeof sh.battery_pct === "number") {
-      setText("shelly-batt", sh.battery_pct.toFixed(0) + " %");
+    //Battery (Only show text when battery is low
+	const battRow = document.getElementById("shelly-batt-row");
+	const battVal = document.getElementById("shelly-batt");
 
-      const battEl = document.getElementById("shelly-batt");
-      if (battEl) {
-        // Semantic coloring
-        if (sh.battery_pct < 25) {
-          battEl.className = "text-red-400";
-        } else if (sh.battery_pct < 50) {
-          battEl.className = "text-amber-400";
-        } else {
-          battEl.className = "text-slate-300";
-        }
-      }
-    }
+	if (battRow && battVal) {
+	  if (typeof sh?.battery_pct === "number" && sh.battery_pct <= 25) {  // Low batt set at 25 %
+		battVal.textContent = sh.battery_pct.toFixed(0) + " %";
+		battRow.classList.remove("hidden");   // show
+	  } else {
+		battRow.classList.add("hidden");      // hide
+	  }
+	}
 
     // Outdoor min/max
     const omm = sh.minmax ?? null;
