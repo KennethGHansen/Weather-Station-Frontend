@@ -54,8 +54,6 @@ function generateMockHistory(hours) {
  * ============================================================================
  */
 let historyRange = "24h";   // default selection
-
-
 function setText(id, value) {
   const el = document.getElementById(id);
   if (el) el.textContent = value;
@@ -89,6 +87,169 @@ function tickClock() {
 tickClock();
 setInterval(tickClock, 1000);
 
+/* ============================================================================
+ * FIXED X-AXIS LABEL STRATEGY (exactly 6 labels)
+ * ============================================================================
+ */
+
+const X_LABEL_COUNT = 6;
+
+/* Evenly pick exactly N indices from 0..len-1 */
+function pickLabelIndices(len, count = X_LABEL_COUNT) {
+  if (len <= count) {
+    // Edge case: very small datasets
+    return [...Array(len).keys()];
+  }
+
+  const result = [];
+  for (let i = 0; i < count; i++) {
+    result.push(Math.round(i * (len - 1) / (count - 1)));
+  }
+  return result;
+}
+
+/* Format timestamp depending on range */
+function formatXAxisLabel(ts, range) {
+  const d = new Date(ts * 1000);
+
+  // 6h + 24h: ALWAYS time labels (including the first tick)
+  if (range === "6h" || range === "24h") {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // 7d: date-only labels
+  return d.toLocaleDateString([], { day: "2-digit", month: "short" });
+}
+
+/* Build labels array + tick callback */
+function buildXAxis(historyData, range) {
+  const len = historyData.length;
+
+  // pick exactly 6 evenly spaced indices
+  const indices = [];
+  for (let i = 0; i < 6; i++) {
+    indices.push(Math.round(i * (len - 1) / 5));
+  }
+  const indexSet = new Set(indices);
+
+  return {
+		labels: historyData.map((p, i) =>
+		  indexSet.has(i) ? formatXAxisLabel(p.ts, range) : ""
+	),
+
+    tickCallback: function (val) {
+      // show only the pre‑formatted label
+      return this.getLabelForValue(val) || "";
+    }
+  };
+}
+
+/* ============================================================================
+ * LEFT-ALIGNED DATE STAMP PLUGIN
+ * ============================================================================
+ *
+ * - Used for 6h and 24h views only
+ * - Renders a date label inside the chart area
+ * - Does NOT consume axis space
+ * - Mobile-safe
+ * ============================================================================
+ */
+const leftDateStampPlugin = {
+  id: "leftDateStamp",
+
+afterDatasetsDraw(chart, args, pluginOptions) {
+  /* ------------------------------------------------------------------------
+   * LEFT DATE STAMP (6h / 24h only)
+   *
+   * Supports TWO layouts:
+   * - Two-line (day / month): temperature, humidity
+   * - Single-line (day month): pressure
+   *
+   * Layout is controlled by plugin option:
+   *   singleLine: true | false
+   * ------------------------------------------------------------------------ */
+
+  const { ctx } = chart;
+  const { range, firstTs, singleLine } = pluginOptions || {};
+
+  if (range !== "6h" && range !== "24h") return;
+  if (!firstTs) return;
+
+  const xScale = chart.scales?.x;
+  if (!xScale || !xScale.ticks || xScale.ticks.length === 0) return;
+
+  // Build date parts
+  const d = new Date(firstTs * 1000);
+  const dayText   = d.toLocaleDateString([], { day: "2-digit" });
+  const monthText = d.toLocaleDateString([], { month: "short" });
+  const oneLineText = `${dayText} ${monthText}`;
+
+  // Match x‑axis tick font
+  const tickFont = Chart.helpers.toFont(xScale.options.ticks.font);
+
+  ctx.save();
+  ctx.font = tickFont.string;
+  ctx.fillStyle = "#9ca3af";
+
+  // Anchor to FIRST tick
+  const tickX = xScale.getPixelForTick(0);
+
+  // Measure first time label width (so we avoid overlap)
+  const firstTimeLabel =
+    typeof xScale.getLabelForValue === "function"
+      ? xScale.getLabelForValue(0)
+      : "";
+
+  const timeLabelWidth = firstTimeLabel
+    ? ctx.measureText(firstTimeLabel).width
+    : 0;
+
+  // Measure date width (depends on mode)
+  const dateWidth = singleLine
+    ? ctx.measureText(oneLineText).width
+    : Math.max(
+        ctx.measureText(dayText).width,
+        ctx.measureText(monthText).width
+      );
+
+  // Horizontal placement:
+  // [ DATE ][ GAP ][ TIME ]
+  const GAP_PX = 8;
+  const x =
+    tickX
+    - (timeLabelWidth / 2)
+    - GAP_PX
+    - (dateWidth / 2);
+
+  // Vertical placement — your calibrated value
+  const lh = tickFont.lineHeight;
+  const Y_NUDGE_PX = -5.5;
+  const baseY = xScale.bottom + Y_NUDGE_PX;
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+
+  if (singleLine) {
+    // Pressure: single-line date
+    ctx.fillText(oneLineText, x, baseY);
+  } else {
+    // Temp / Hum: two-line date
+    ctx.fillText(dayText,   x, baseY - lh);
+    ctx.fillText(monthText, x, baseY);
+  }
+
+  ctx.restore();
+}
+
+};
+
+// register plugin ONCE (before any new Chart(...))
+Chart.register(leftDateStampPlugin);
+
+/* ============================================================================
+ * Update weather function
+ * ============================================================================
+ */
 async function updateWeather() {
   const res = await fetch("/api/weather", { cache: "no-store" });
   const data = await res.json();
@@ -130,17 +291,6 @@ async function updateWeather() {
 		cards.style.pointerEvents = "none";   // optional
 	  }
 	}
-
-  // consider station online if last update < 30 seconds ago
-  if (lastTs !== null && now - lastTs < 30) {
-    dot.className = "w-3 h-3 rounded-full bg-green-500";
-    label.textContent = "Weather‑Station Online";
-    label.className = "text-sm font-medium text-green-400";
-  } else {
-    dot.className = "w-3 h-3 rounded-full bg-red-500";
-    label.textContent = "Weather‑Station Offline";
-    label.className = "text-sm font-medium text-red-400";
-  }
 
   // Temperature (works even if minmax/derived missing)
   if (typeof w.temp === "number") {
@@ -475,15 +625,10 @@ function renderTemperatureChart(historyData) {
   const canvas = document.getElementById("temp-chart-canvas");
   if (!canvas) return;
 
-  /* Convert history into chart-friendly arrays */
-  const labels = historyData.map(p =>
-  new Date(p.ts * 1000).toLocaleString([], {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit"
-  })
-  );
+  /* Use fixed amount of labels for the x-axis to avoid clutter */
+  const xAxis = buildXAxis(historyData, historyRange);
+  const labels = xAxis.labels;
+
 
   const indoorTemps = historyData.map(p => p.indoor.temp_c);
   const outdoorTemps = historyData.map(p => p.outdoor.temp_c);
@@ -519,34 +664,31 @@ function renderTemperatureChart(historyData) {
 	options: {
 	  responsive: true,
 
-	  plugins: {
-		legend: {
-		  labels: { color: "#e5e7eb" }
-		},
-		// Show full timestamp in tooltip
-		tooltip: {
-		  callbacks: {
-			title: (items) => {
-			  const d = items[0].parsed.x;
-			  return new Date(d).toLocaleString();
-			}
-		  }
-		}
-	  },
-	  scales: {
-		x: {
-			ticks: { color: "#9ca3af" }
-		},
-
-		y: {
-		  ticks: { color: "#9ca3af" },
-		  title: {
-			display: true,
-			text: "°C",
-			color: "#9ca3af"
-		  }
-		}
+	plugins: {
+	  legend: { labels: { color: "#e5e7eb" } },
+	  leftDateStamp: {
+		range: historyRange,
+		firstTs: historyData[0]?.ts
 	  }
+	},
+	scales: {
+			x: {
+				ticks: {
+				  color: "#9ca3af",
+				  autoSkip: false,
+				  maxRotation: 0,
+				  callback: xAxis.tickCallback
+				}
+			},
+			y: {
+			  ticks: { color: "#9ca3af" },
+			  title: {
+				display: true,
+				text: "°C",
+				color: "#9ca3af"
+			}
+		}
+	}
 	}
   });
 }
@@ -563,13 +705,10 @@ let humidityChart = null;
 function renderHumidityChart(historyData) {
   const canvas = document.getElementById("humidity-chart-canvas");
   if (!canvas) return;
-
-  const labels = historyData.map(p =>
-    new Date(p.ts * 1000).toLocaleString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    })
-  );
+	
+  /* Use fixed amount of labels for the x-axis to avoid clutter */
+  const xAxis = buildXAxis(historyData, historyRange);
+  const labels = xAxis.labels;
 
   const indoorHum = historyData.map(p => p.indoor.hum_pct);
   const outdoorHum = historyData.map(p => p.outdoor.hum_pct);
@@ -602,11 +741,22 @@ function renderHumidityChart(historyData) {
     },
     options: {
       responsive: true,
-      plugins: {
-        legend: { labels: { color: "#e5e7eb" } }
-      },
-      scales: {
-        x: { ticks: { color: "#9ca3af" } },
+	  plugins: {
+		legend: { labels: { color: "#e5e7eb" } },
+		leftDateStamp: {
+		range: historyRange,
+		firstTs: historyData[0]?.ts
+		}
+	},
+      scales: {  
+		x: {
+			ticks: {
+			  color: "#9ca3af",
+			  autoSkip: false,
+			  maxRotation: 0,
+			  callback: xAxis.tickCallback
+			}
+		},
         y: {
           ticks: { color: "#9ca3af" },
           title: {
@@ -635,13 +785,9 @@ function renderPressureChart(historyData) {
   const canvas = document.getElementById("pressure-chart-canvas");
   if (!canvas) return;
 
-  // X-axis labels (same strategy as other charts)
-  const labels = historyData.map(p =>
-    new Date(p.ts * 1000).toLocaleString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    })
-  );
+  /* Use fixed amount of labels for the x-axis to avoid clutter */
+  const xAxis = buildXAxis(historyData, historyRange);
+  const labels = xAxis.labels;
 
   // Pressure in hPa (convert from Pa)
   const pressure = historyData.map(
@@ -671,10 +817,22 @@ function renderPressureChart(historyData) {
     options: {
       responsive: true,
       plugins: {
-        legend: { labels: { color: "#e5e7eb" } }
-      },
+		legend: { labels: { color: "#e5e7eb" } },
+		leftDateStamp: {
+		range: historyRange,
+		firstTs: historyData[0]?.ts,
+		singleLine: true 
+	  }
+	},
       scales: {
-        x: { ticks: { color: "#9ca3af" } },
+		x: {
+			ticks: {
+			  color: "#9ca3af",
+			  autoSkip: false,
+			  maxRotation: 0,
+			  callback: xAxis.tickCallback
+			}
+		},	
         y: {
           ticks: { color: "#9ca3af" },
           title: {
