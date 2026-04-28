@@ -118,6 +118,28 @@ export default {
       const internalReq = new Request("https://do/latest", { method: "GET" });
       return await stub.fetch(internalReq);
     }
+	
+	// ---------------------------------
+	// GET /api/history (UI → history)
+	// STEP 2: MINIMUM IMPLEMENTATION
+	// ---------------------------------
+	if (url.pathname === "/api/history" && request.method === "GET") {
+	  const range = url.searchParams.get("range");
+
+	  // Validate range strictly
+	  if (!["6h", "24h", "7d"].includes(range)) {
+		return json({ error: "invalid range" }, 400);
+	  }
+
+	  // TEMPORARY STEP 2 BEHAVIOUR:
+	  // - Return empty history
+	  // - Confirms frontend contract
+	  // - Confirms routing
+	  return json({
+		range,
+		samples: []
+	  });
+	}
 
     // ---------------------------------
     // Health check
