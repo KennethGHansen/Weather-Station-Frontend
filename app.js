@@ -33,6 +33,33 @@ async function loadHistoryOnce() {
   }
 }
 
+/* ============================================================================
+ * HISTORY LIVE UPDATE (EXACTLY ONE TIMER)
+ * ========================================================================== */
+
+let historyPollTimer = null;
+
+function startHistoryPolling() {
+  // ✅ HARD reset (never rely on "if (timer)")
+  stopHistoryPolling();
+
+  // Immediate fetch
+  loadHistoryOnce();
+
+  // Single, controlled interval
+  historyPollTimer = setInterval(() => {
+    loadHistoryOnce();
+  }, 15000);
+}
+
+function stopHistoryPolling() {
+  if (historyPollTimer !== null) {
+    clearInterval(historyPollTimer);
+    historyPollTimer = null;
+  }
+}
+``
+
 
 /* ============================================================================
  * HISTORY WINDOW CONFIG (authoritative UI contract)
@@ -603,14 +630,16 @@ timeButtons.forEach((btn) => {
      * We store the value as text ("6h", "24h", "7d").
      * This mirrors how a backend API will be queried later.
      */
-	historyRange = btn.textContent.trim();
 
+	historyRange = btn.textContent.trim();
+	
 	// Then redraw charts
 	if (!historyPage.classList.contains("hidden")) {
 		loadHistoryOnce();
 	}
   });
 });
+
 
 /* ============================================================================
  * TEMPERATURE HISTORY CHART (Chart.js)

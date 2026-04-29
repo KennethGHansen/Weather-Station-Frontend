@@ -10,7 +10,6 @@
     "run_worker_first": false
   },
 
-  // (Optional) keep KV binding for later/historical use, but we won't write to it anymore
   "kv_namespaces": [
     {
       "id": "acd6a77f01684e34bd57863bf27f4284",
@@ -18,21 +17,50 @@
     }
   ],
 
-  // NEW: Durable Object binding
+  // ===========================================================================
+  // DURABLE OBJECT BINDINGS
+  // - WEATHER_DO         = existing (KV-backed) DO used for "latest"
+  // - WEATHER_HISTORY_DO = NEW (SQLite-backed) DO used for history
+  // ===========================================================================
   "durable_objects": {
     "bindings": [
       {
         "name": "WEATHER_DO",
         "class_name": "WeatherDO"
+      },
+      {
+        "name": "WEATHER_HISTORY_DO",
+        "class_name": "WeatherHistoryDO"
       }
     ]
   },
 
-  // NEW: SQLite-backed DO migration (required for new SQLite-backed classes)
+  // ===========================================================================
+  // MIGRATIONS
+  //
+  // CRITICAL RULES (do NOT skip):
+  // 1) NEVER delete old migration tags that are already deployed.
+  //    Wrangler compares what your account already has vs this file. [1](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)
+  //
+  // 2) DO NOT try to "new_sqlite_classes" an existing DO class (WeatherDO).
+  //    That is exactly what caused your error. Only NEW classes go here. [1](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)
+  //
+  // 3) Add a NEW tag for the NEW SQLite class WeatherHistoryDO.
+  // ===========================================================================
   "migrations": [
     {
+      // ✅ Keep this tag if your deployed worker already has v1.
+      // If your original config used v1 for WeatherDO, keep it here.
       "tag": "v1",
       "new_sqlite_classes": ["WeatherDO"]
+      // NOTE: If WeatherDO was NOT created as sqlite originally, this line may be wrong.
+      // BUT your deployment warning says the deployed script has tag v1.
+      // Keep the migration entry matching your original setup so Wrangler stops warning.
+    },
+    {
+      // ✅ NEW migration tag for the NEW SQLite-backed DO class
+      "tag": "v2",
+      "new_sqlite_classes": ["WeatherHistoryDO"]
     }
   ]
 }
