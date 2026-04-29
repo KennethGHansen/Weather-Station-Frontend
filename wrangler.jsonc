@@ -18,7 +18,7 @@
     }
   ],
 
-  // ✅ NEW: Durable Object binding
+  // NEW: Durable Object binding
   "durable_objects": {
     "bindings": [
       {
@@ -28,7 +28,7 @@
     ]
   },
 
-  // ✅ NEW: SQLite-backed DO migration (required for new SQLite-backed classes)
+  // NEW: SQLite-backed DO migration (required for new SQLite-backed classes)
   "migrations": [
     {
       "tag": "v1",

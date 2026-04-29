@@ -3,37 +3,77 @@ function json(obj, status = 200, extraHeaders = {}) {
     status,
     headers: {
       "Content-Type": "application/json",
-      // Avoid any accidental caching of API responses
       "Cache-Control": "no-store",
       ...extraHeaders,
     },
   });
 }
 
-/**
- * Durable Object: stores the latest weather record with strong consistency.
- * - Uses in-memory cache for fast reads
- * - Persists to DO storage so it survives restarts/eviction
- *
- * DO storage is private per-object and strongly consistent. [1](https://developers.cloudflare.com/durable-objects/)[3](https://developers.cloudflare.com/durable-objects/best-practices/access-durable-objects-storage/)
+/* ============================================================================
+ * HISTORY WINDOW CONFIG (must match frontend)
+ * ============================================================================
+ */
+const HISTORY_CFG = {
+  "6h":  { windowSec: 6 * 3600,   maxSamples: 72  },
+  "24h": { windowSec: 24 * 3600,  maxSamples: 144 },
+  "7d":  { windowSec: 7 * 86400,  maxSamples: 168 }
+};
+
+/* ============================================================================
+ * Durable Object: WeatherDO
+ * ============================================================================
+ * Stores:
+ * - "latest"  (single record)
+ * - "history" (array of raw samples)
+ * ============================================================================
  */
 export class WeatherDO {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
-    this.latest = null;
 
-    // Ensure we load stored state before handling requests.
-    // blockConcurrencyWhile blocks other events until init completes. [6](https://developers.cloudflare.com/durable-objects/api/state/)
+    this.latest = null;
+    this.history = [];
+
     this.ctx.blockConcurrencyWhile(async () => {
       this.latest = await this.ctx.storage.get("latest");
+      this.history = (await this.ctx.storage.get("history")) ?? [];
     });
   }
 
   async fetch(request) {
     const url = new URL(request.url);
 
-    // Internal endpoint: write latest
+    // ------------------------------------------------------------
+    // Internal: GET /history?range=6h|24h|7d
+    // Applies windowing + maxSamples (NO aggregation)
+    // ------------------------------------------------------------
+    if (url.pathname === "/history" && request.method === "GET") {
+      const range = url.searchParams.get("range");
+      const cfg = HISTORY_CFG[range];
+      if (!cfg) return json({ error: "invalid range" }, 400);
+
+      const now = Math.floor(Date.now() / 1000);
+      const cutoff = now - cfg.windowSec;
+
+      // Filter to time window
+      let samples = this.history.filter(s => s && typeof s.ts === "number" && s.ts >= cutoff);
+
+      // Ensure ascending ts
+      samples.sort((a, b) => a.ts - b.ts);
+
+      // Cap to maxSamples (keep newest N)
+      if (samples.length > cfg.maxSamples) {
+        samples = samples.slice(samples.length - cfg.maxSamples);
+      }
+
+      return json({ samples });
+    }
+
+    // ------------------------------------------------------------
+    // Internal: POST /update
+    // Writes latest + appends raw history + trims retention
+    // ------------------------------------------------------------
     if (url.pathname === "/update" && request.method === "POST") {
       let record;
       try {
@@ -42,25 +82,34 @@ export class WeatherDO {
         return json({ error: "invalid json" }, 400);
       }
 
+      // Update latest
       this.latest = record;
-
-      // DO Storage API supports KV-style get/put and is transactional/strongly consistent. [5](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)[3](https://developers.cloudflare.com/durable-objects/best-practices/access-durable-objects-storage/)
       await this.ctx.storage.put("latest", record);
+
+      // Append raw history sample
+      this.history.push({
+        ts: record.ts,
+        boot_id: record.boot_id ?? null,
+        weather: record.weather
+      });
+
+      // Trim retention (keep 10 days)
+      const RETENTION_SEC = 10 * 24 * 60 * 60;
+      const cutoffTs = record.ts - RETENTION_SEC;
+      this.history = this.history.filter(s => s && typeof s.ts === "number" && s.ts >= cutoffTs);
+
+      // Persist history
+      await this.ctx.storage.put("history", this.history);
 
       return json({ ok: true });
     }
 
-    // Internal endpoint: read latest
+    // ------------------------------------------------------------
+    // Internal: GET /latest
+    // ------------------------------------------------------------
     if (url.pathname === "/latest" && request.method === "GET") {
-      // If memory is empty (cold start), read from storage
-      if (!this.latest) {
-        this.latest = await this.ctx.storage.get("latest");
-      }
-
-      if (!this.latest) {
-        return json({ error: "no data yet" }, 404);
-      }
-
+      if (!this.latest) this.latest = await this.ctx.storage.get("latest");
+      if (!this.latest) return json({ error: "no data yet" }, 404);
       return json(this.latest);
     }
 
@@ -68,18 +117,20 @@ export class WeatherDO {
   }
 }
 
+/* ============================================================================
+ * Worker entrypoint
+ * ============================================================================
+ */
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Choose a single named DO instance for your station.
-    // idFromName() + get() is the standard way to address a specific object. [2](https://developers.cloudflare.com/durable-objects/api/namespace/)
     const doId = env.WEATHER_DO.idFromName("default");
     const stub = env.WEATHER_DO.get(doId);
 
-    // ---------------------------------
+    // -----------------------------
     // POST /api/weather (ESP → cloud)
-    // ---------------------------------
+    // -----------------------------
     if (url.pathname === "/api/weather" && request.method === "POST") {
       let payload;
       try {
@@ -88,10 +139,7 @@ export default {
         return json({ error: "invalid json" }, 400);
       }
 
-      let ts = payload.ts;
-      if (!ts || ts < 1_000_000_000) {
-        ts = Math.floor(Date.now() / 1000);
-      }
+      const ts = Math.floor(Date.now() / 1000);
 
       const record = {
         ts,
@@ -100,58 +148,49 @@ export default {
         weather: payload,
       };
 
-      // Persist to Durable Object instead of KV (strong consistency, high write rate).
-      // DOs have a soft limit of ~1,000 req/s per object. [7](https://developers.cloudflare.com/durable-objects/platform/limits/)
-      const internalReq = new Request("https://do/update", {
+      return await stub.fetch(new Request("https://do/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(record),
-      });
-
-      return await stub.fetch(internalReq);
+      }));
     }
 
-    // ---------------------------------
+    // -----------------------------
     // GET /api/weather (UI → latest)
-    // ---------------------------------
+    // -----------------------------
     if (url.pathname === "/api/weather" && request.method === "GET") {
-      const internalReq = new Request("https://do/latest", { method: "GET" });
-      return await stub.fetch(internalReq);
+      return await stub.fetch(new Request("https://do/latest", { method: "GET" }));
     }
-	
-	// ---------------------------------
-	// GET /api/history (UI → history)
-	// STEP 2: MINIMUM IMPLEMENTATION
-	// ---------------------------------
-	if (url.pathname === "/api/history" && request.method === "GET") {
-	  const range = url.searchParams.get("range");
 
-	  // Validate range strictly
-	  if (!["6h", "24h", "7d"].includes(range)) {
-		return json({ error: "invalid range" }, 400);
-	  }
+    // -----------------------------
+    // GET /api/history?range=...
+    // Worker forwards to DO /history?range=...
+    // -----------------------------
+    if (url.pathname === "/api/history" && request.method === "GET") {
+      const range = url.searchParams.get("range");
+      if (!["6h", "24h", "7d"].includes(range)) {
+        return json({ error: "invalid range" }, 400);
+      }
 
-	  // TEMPORARY STEP 2 BEHAVIOUR:
-	  // - Return empty history
-	  // - Confirms frontend contract
-	  // - Confirms routing
-	  return json({
-		range,
-		samples: []
-	  });
-	}
+      const res = await stub.fetch(new Request(`https://do/history?range=${encodeURIComponent(range)}`, {
+        method: "GET",
+      }));
 
-    // ---------------------------------
+      // Pass-through samples
+      const data = await res.json();
+      return json({ range, samples: data.samples ?? [] });
+    }
+
+    // -----------------------------
     // Health check
-    // ---------------------------------
+    // -----------------------------
     if (url.pathname === "/api/test") {
       return json({ status: "worker-alive" });
     }
 
-    // ---------------------------------
+    // -----------------------------
     // Static assets
-    // ---------------------------------
+    // -----------------------------
     return env.ASSETS.fetch(request);
   },
 };
-

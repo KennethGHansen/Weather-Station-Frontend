@@ -3,7 +3,7 @@
  * ============================================================================
  */
 async function loadHistoryOnce() {
-	console.log("loadHistoryOnce CALLED"); // ✅ TEMP DEBUG
+	console.log("loadHistoryOnce CALLED"); // TEMP DEBUG
   try {
     const res = await fetch(`/api/history?range=${historyRange}`, {
       cache: "no-store"
@@ -607,7 +607,7 @@ timeButtons.forEach((btn) => {
 
 	// Then redraw charts
 	if (!historyPage.classList.contains("hidden")) {
-	renderAllHistoryCharts([]); // TEMP: real fetch will happen in next step
+		loadHistoryOnce();
 	}
   });
 });
@@ -634,34 +634,19 @@ function renderTemperatureChart(historyData) {
   const canvas = document.getElementById("temp-chart-canvas");
   if (!canvas) return;
 
-  // --------------------------------------------------------------------------
-  // 1) Normalize input (defensive)
-  // --------------------------------------------------------------------------
   const dataArr = Array.isArray(historyData) ? historyData : [];
 
-  // --------------------------------------------------------------------------
-  // 2) Build X-axis (safe for empty data)
-  // --------------------------------------------------------------------------
   const xAxis = buildXAxis(dataArr, historyRange);
   const labels = xAxis.labels;
 
-  // --------------------------------------------------------------------------
-  // 3) Extract REAL Y-series (empty arrays are valid)
-  // --------------------------------------------------------------------------
-  const indoorTemps = dataArr
-    .map(p => p?.indoor?.temp_c)
-    .filter(v => typeof v === "number");
+  const indoorTemps = dataArr.map(p =>
+	  (typeof p?.weather?.temp === "number") ? p.weather.temp : null
+	);
 
-  const outdoorTemps = dataArr
-    .map(p => p?.outdoor?.temp_c)
-    .filter(v => typeof v === "number");
+  const outdoorTemps = dataArr.map(_ => null); // no outdoor temp yet
 
-  // Oldest REAL sample timestamp (or null if empty)
   const firstTs = dataArr.length > 0 ? dataArr[0].ts : null;
 
-  // --------------------------------------------------------------------------
-  // 4) Create chart ONCE
-  // --------------------------------------------------------------------------
   if (!tempChart) {
     tempChart = new Chart(canvas, {
       type: "line",
@@ -673,14 +658,24 @@ function renderTemperatureChart(historyData) {
             data: indoorTemps,
             borderColor: "#38bdf8",
             backgroundColor: "rgba(56,189,248,0.12)",
-            tension: 0.3
+            tension: 0,
+            spanGaps: true,
+            showLine: true,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 2
           },
           {
             label: "Outdoor",
             data: outdoorTemps,
             borderColor: "#a78bfa",
             backgroundColor: "rgba(167,139,250,0.12)",
-            tension: 0.3
+            tension: 0,
+            spanGaps: true,
+            showLine: true,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 2
           }
         ]
       },
@@ -689,7 +684,6 @@ function renderTemperatureChart(historyData) {
         maintainAspectRatio: false,
         plugins: {
           legend: { labels: { color: "#e5e7eb" } },
-          // Will auto-disable when firstTs is null
           leftDateStamp: { range: historyRange, firstTs }
         },
         scales: {
@@ -702,6 +696,8 @@ function renderTemperatureChart(historyData) {
             }
           },
           y: {
+            min: 0,
+            max: 40,
             ticks: { color: "#9ca3af" },
             title: { display: true, text: "°C", color: "#9ca3af" }
           }
@@ -711,9 +707,6 @@ function renderTemperatureChart(historyData) {
     return;
   }
 
-  // --------------------------------------------------------------------------
-  // 5) Update existing chart in-place (NO re-creation, NO animation)
-  // --------------------------------------------------------------------------
   tempChart.data.labels = labels;
   tempChart.data.datasets[0].data = indoorTemps;
   tempChart.data.datasets[1].data = outdoorTemps;
@@ -746,13 +739,12 @@ function renderHumidityChart(historyData) {
   const xAxis = buildXAxis(dataArr, historyRange);
   const labels = xAxis.labels;
 
-  const indoorHum = dataArr
-    .map(p => p?.indoor?.hum_pct)
-    .filter(v => typeof v === "number");
+  const indoorHum = dataArr.map(p =>
+	  (typeof p?.weather?.hum === "number") ? p.weather.hum : null
+	);
 
-  const outdoorHum = dataArr
-    .map(p => p?.outdoor?.hum_pct)
-    .filter(v => typeof v === "number");
+  const outdoorHum = dataArr.map(_ => null); // no outdoor humidity yet
+
 
   const firstTs = dataArr.length > 0 ? dataArr[0].ts : null;
 
@@ -767,14 +759,24 @@ function renderHumidityChart(historyData) {
             data: indoorHum,
             borderColor: "#34d399",
             backgroundColor: "rgba(52,211,153,0.12)",
-            tension: 0.3
+            tension: 0,
+            spanGaps: true,
+            showLine: true,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 2
           },
           {
             label: "Outdoor",
             data: outdoorHum,
             borderColor: "#fbbf24",
             backgroundColor: "rgba(251,191,36,0.12)",
-            tension: 0.3
+            tension: 0,
+            spanGaps: true,
+            showLine: true,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 2
           }
         ]
       },
@@ -783,11 +785,7 @@ function renderHumidityChart(historyData) {
         maintainAspectRatio: false,
         plugins: {
           legend: { labels: { color: "#e5e7eb" } },
-          leftDateStamp: {
-            range: historyRange,
-            firstTs,
-            singleLine: false
-          }
+          leftDateStamp: { range: historyRange, firstTs, singleLine: false }
         },
         scales: {
           x: {
@@ -799,6 +797,8 @@ function renderHumidityChart(historyData) {
             }
           },
           y: {
+            min: 0,
+            max: 100,
             ticks: { color: "#9ca3af" },
             title: { display: true, text: "%", color: "#9ca3af" }
           }
@@ -812,13 +812,9 @@ function renderHumidityChart(historyData) {
   humidityChart.data.datasets[0].data = indoorHum;
   humidityChart.data.datasets[1].data = outdoorHum;
 
-  humidityChart.options.plugins.leftDateStamp = {
-    range: historyRange,
-    firstTs,
-    singleLine: false
-  };
-
+  humidityChart.options.plugins.leftDateStamp = { range: historyRange, firstTs, singleLine: false };
   humidityChart.options.scales.x.ticks.callback = xAxis.tickCallback;
+
   humidityChart.update("none");
 }
 
@@ -844,11 +840,11 @@ function renderPressureChart(historyData) {
   const xAxis = buildXAxis(dataArr, historyRange);
   const labels = xAxis.labels;
 
-  // Convert Pa → hPa
-  const pressure = dataArr
-    .map(p => p?.indoor?.pressure_pa)
-    .filter(v => typeof v === "number")
-    .map(pa => pa / 100);
+  const pressure = dataArr.map(p =>
+	  (typeof p?.weather?.pressure === "number")
+		? p.weather.pressure / 100   // Pa → hPa
+		: null
+	);
 
   const firstTs = dataArr.length > 0 ? dataArr[0].ts : null;
 
@@ -863,7 +859,12 @@ function renderPressureChart(historyData) {
             data: pressure,
             borderColor: "#60a5fa",
             backgroundColor: "rgba(96,165,250,0.12)",
-            tension: 0.3
+            tension: 0,
+            spanGaps: true,
+            showLine: true,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 2
           }
         ]
       },
@@ -872,11 +873,7 @@ function renderPressureChart(historyData) {
         maintainAspectRatio: false,
         plugins: {
           legend: { labels: { color: "#e5e7eb" } },
-          leftDateStamp: {
-            range: historyRange,
-            firstTs,
-            singleLine: true
-          }
+          leftDateStamp: { range: historyRange, firstTs, singleLine: true }
         },
         scales: {
           x: {
@@ -888,6 +885,8 @@ function renderPressureChart(historyData) {
             }
           },
           y: {
+            min: 950,
+            max: 1050,
             ticks: { color: "#9ca3af" },
             title: { display: true, text: "hPa", color: "#9ca3af" }
           }
@@ -900,12 +899,8 @@ function renderPressureChart(historyData) {
   pressureChart.data.labels = labels;
   pressureChart.data.datasets[0].data = pressure;
 
-  pressureChart.options.plugins.leftDateStamp = {
-    range: historyRange,
-    firstTs,
-    singleLine: true
-  };
-
+  pressureChart.options.plugins.leftDateStamp = { range: historyRange, firstTs, singleLine: true };
   pressureChart.options.scales.x.ticks.callback = xAxis.tickCallback;
+
   pressureChart.update("none");
 }
