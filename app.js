@@ -1,13 +1,14 @@
 // ===============================
-// Hidden DEV toggle for data mode
+// Hidden DEV toggle for history data source (SIM vs REAL)
+// Default is REAL; SIM is for local/dev inspection only
 // ===============================
 (function setupHiddenDataModeToggle() {
   const KEY = "weather_data_mode"; // "sim" | "real"
   const DEFAULT_MODE = "real";
 
-// Initialize only if missing
-if (localStorage.getItem(KEY) !== "real") {
-  localStorage.setItem(KEY, DEFAULT_MODE); // DEFAULT_MODE is now "real"
+// Initialize once; REAL is the production default
+if (!localStorage.getItem(KEY)) {
+  localStorage.setItem(KEY, DEFAULT_MODE);
 }
 
 // Ctrl + Alt + D toggles mode
@@ -29,11 +30,10 @@ window.__getWeatherDataMode = () =>
 })();
 
 /* ============================================================================
- * STEP 1 — Load history snapshot (one-shot, no polling)
+ * Load history snapshot (idempotent; used by controlled polling)
  * ============================================================================
  */
 async function loadHistoryOnce() {
-  console.log("loadHistoryOnce CALLED"); // TEMP DEBUG
   try {
     // ============================================================
     // DATA MODE (hidden toggle)
@@ -57,9 +57,6 @@ async function loadHistoryOnce() {
     //   /api/history?range=24h&amp;mode=sim
     //   /api/history?range=24h&amp;mode=real
     // ============================================================
-
-    // FIX: query separator must be "&" in JavaScript, not "&amp;"
-    //      Otherwise the Worker never receives a real "mode" param.
 
 	const res = await fetch(
 	  `/api/history?range=${historyRange}&mode=${encodeURIComponent(mode)}&t=${Date.now()}`,
@@ -99,7 +96,7 @@ async function loadHistoryOnce() {
 let historyPollTimer = null;
 
 function startHistoryPolling() {
-  // ✅ HARD reset (never rely on "if (timer)")
+  // HARD reset (never rely on "if (timer)")
   stopHistoryPolling();
 
   // Immediate fetch
@@ -117,26 +114,6 @@ function stopHistoryPolling() {
     historyPollTimer = null;
   }
 }
-
-/* ============================================================================
- * HISTORY WINDOW CONFIG (authoritative UI contract)
- * ============================================================================
- *
- * Defines:
- * - Nominal sample spacing per history range
- * - Fixed window size expected by the charts
- *
- * NOTE:
- * - Samples are REAL and event-driven
- * - stepSec is NOT used to generate time
- * - Backend and frontend must agree on these values
- * ============================================================================
- */
-const HISTORY_CFG = {
-  "6h":  { stepSec: 5 * 60,    maxSamples: 72  },
-  "24h": { stepSec: 10 * 60,   maxSamples: 144 },
-  "7d":  { stepSec: 60 * 60,   maxSamples: 168 }
-};
 
 /* ============================================================================
  * HISTORY BUFFER (sliding window)
@@ -199,9 +176,6 @@ setInterval(tickClock, 1000);
  * FIXED X-AXIS LABEL STRATEGY (exactly 6 labels)
  * ============================================================================
  */
-
-const X_LABEL_COUNT = 6;
-
 /* Format timestamp depending on range */
 function formatXAxisLabel(ts, range) {
   const d = new Date(ts * 1000);
@@ -257,6 +231,7 @@ function buildXAxis(historyData, range) {
  * - This does NOT affect chart layout
  * - This does NOT affect data
  * - This is pure visual context only
+ * - Safe to remove without breaking charts (pure decoration)
  *
  * WHEN IT APPEARS:
  * - Only for 6h and 24h views
@@ -458,7 +433,7 @@ async function updateWeather() {
       setText("out-humidity", sh.humidity_pct.toFixed(1) + " %");
     }
 
-    //Battery (Only show text when battery is low
+    // Battery (only shown when Shelly reports low level)
     const battRow = document.getElementById("shelly-batt-row");
     const battVal = document.getElementById("shelly-batt");
 
@@ -589,9 +564,7 @@ function renderAllHistoryCharts(data) {
   renderPressureChart(data);
 }
 
-/* Defensive check:
- * If any element is missing, do nothing (prevents runtime errors).
- */
+// Guard against partial DOM load (static hosting / cache edge cases)
 if (btnHistory && overviewPage && historyPage) {
 
   /* Attach click handler once.

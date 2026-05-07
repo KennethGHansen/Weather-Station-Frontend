@@ -1,17 +1,14 @@
 /* =============================================================================
- * weather-station / worker.js  (ESM module)
+ * weather-station / worker.js (ESM module)
  * =============================================================================
- *
- * IMPORTANT:
- * - NO top-level `return` allowed in ESM. All returns must be inside functions. [1](https://github.com/evanw/esbuild/issues/1814)
+ * Two Durable Objects:
+ * 1) WeatherDO: stores latest live reading + decides deterministic history sampling times
+ * 2) WeatherHistoryDO: stores deterministic snapshot points (SQLite)
+ *    - 6h: every 5 min, 24h: every 10 min, 7d: every 1 hour
+ *    - no aggregation; missing timestamps are null-filled on read
  *
  * FEATURE FLAG:
  * - env.HISTORY_ENABLED controls whether history is written/read.
- * - The flag is checked INSIDE the Worker fetch handler (never at top-level).
- *
- * TWO Durable Objects:
- * 1) WeatherDO: latest only (KV)
- * 2) WeatherHistoryDO: history rows (SQLite), bucketed+gap-filled
  * =============================================================================
  */
 
@@ -33,13 +30,15 @@ function json(obj, status = 200, extraHeaders = {}) {
 /* HISTORY CONFIG                                                                 */
 /* ----------------------------------------------------------------------------- */
 const HISTORY_CFG = {
-  "6h":  { stepSec: 5 * 60,    maxSamples: 72,  windowSec: 6 * 3600   },
-  "24h": { stepSec: 10 * 60,   maxSamples: 144, windowSec: 24 * 3600  },
-  "7d":  { stepSec: 60 * 60,   maxSamples: 168, windowSec: 7 * 86400  },
+  "6h":  { stepSec: 5 * 60,    maxSamples: 72},
+  "24h": { stepSec: 10 * 60,   maxSamples: 144},
+  "7d":  { stepSec: 60 * 60,   maxSamples: 168},
 };
 
- // NEW: lastOutdoor is optional and provides latched fallback values for Shelly.
-  function normalizeForHistory(payload, lastOutdoor = null) {
+ 
+  // Normalize the incoming device payload to the stable history schema.
+  // lastOutdoor provides latched Shelly values when a boundary sample lands between updates.
+function normalizeForHistory(payload, lastOutdoor = null) {
 
   const temp =
     (typeof payload?.temp === "number") ? payload.temp :
@@ -78,13 +77,10 @@ const HISTORY_CFG = {
   };
 }
 
-
-
-/* ============================================================================ */
-/* SIMULATED HISTORY (FIXTURE MODE)                                             */
-/* ============================================================================ */
-/* (unchanged) */
-
+/* SIMULATED HISTORY (DEV MODE)
+ * Used when /api/history is requested without mode=real (or with mode=sim).
+ * Intended for UI testing without relying on device/DO availability.
+ */
 function hash32(x) {
   x |= 0;
   x ^= x >>> 16;
@@ -216,25 +212,24 @@ async function getSimulatedHistory(range) {
  * Durable Object #1: WeatherDO (LATEST ONLY, KV)
  * ============================================================================= */
 export class WeatherDO {
-  constructor(ctx, env) {
+  constructor(ctx) {
     this.ctx = ctx;
-    this.env = env;
     this.latest = null;
 	
-	// NEW: latched last-known outdoor readings (Shelly)
+	// Latched last-known outdoor readings (Shelly)
 	// These are used when sampling history so we don't miss outdoor data at boundaries.
-	this.lastOutdoor = { temperature_c: null, humidity_pct: null }; // NEW
+	this.lastOutdoor = { temperature_c: null, humidity_pct: null };
 
-	// NEW: deterministic sampling state per range (aligned to step boundaries)
+	// Deterministic sampling state per range (aligned to step boundaries)
 	this.lastSampleTsByRange = { "6h": 0, "24h": 0, "7d": 0 };
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.latest = await this.ctx.storage.get("latest");
 
-	// NEW: load latched outdoor readings from storage (if any)
+	// Load latched outdoor readings from storage (if any)
 	this.lastOutdoor =(await this.ctx.storage.get("lastOutdoor")) ?? { temperature_c: null, humidity_pct: null };
 	  
-	// NEW: load per-range sampler state from storage
+	// Load per-range sampler state from storage
     this.lastSampleTsByRange =(await this.ctx.storage.get("lastSampleTsByRange")) ?? { "6h": 0, "24h": 0, "7d": 0 };
     });
   }
@@ -254,10 +249,10 @@ export class WeatherDO {
       this.latest = record;
       await this.ctx.storage.put("latest", record);
 	  
-	  // NEW: latch last-known outdoor readings whenever present in the incoming record
+	  // Latch last-known outdoor readings whenever present in the incoming record
 	  // We latch from record.weather.shelly (the live payload) if it contains numbers.
-	  const sh = record?.weather?.shelly; // NEW
-	  let outdoorChanged = false;          // NEW
+	  const sh = record?.weather?.shelly; 
+	  let outdoorChanged = false;          
 
 	  if (typeof sh?.temperature_c === "number") {
 		  this.lastOutdoor.temperature_c = sh.temperature_c;
@@ -268,36 +263,36 @@ export class WeatherDO {
 		  outdoorChanged = true;
 	  }
 
-		// NEW: persist latches only when we actually updated them
+		// persist latches only when we actually updated them
 		if (outdoorChanged) {
 		  await this.ctx.storage.put("lastOutdoor", this.lastOutdoor);
 		}
 	  
 
-	// NEW: deterministic sampling decisions (aligned to exact boundaries)
+	// Deterministic sampling decisions (aligned to exact boundaries)
 	// - Returns 0..3 due samples (6h/24h/7d) to the Worker.
 	// - Each range writes exactly once per aligned timestamp.
 	const nowTs = record?.ts;
-	const dueSamples = []; // NEW
+	const dueSamples = []; 
 
 	if (typeof nowTs === "number") {
 	  for (const range of ["6h", "24h", "7d"]) {
-		const step = HISTORY_CFG[range].stepSec;               // NEW
-		const sampleTs = Math.floor(nowTs / step) * step;      // NEW: aligned timestamp
-		const lastTs = this.lastSampleTsByRange?.[range] ?? 0; // NEW
+		const step = HISTORY_CFG[range].stepSec;               
+		const sampleTs = Math.floor(nowTs / step) * step;      // aligned timestamp
+		const lastTs = this.lastSampleTsByRange?.[range] ?? 0; 
 
 		if (sampleTs > lastTs) {
-		  dueSamples.push({ range, ts: sampleTs });            // NEW
-		  this.lastSampleTsByRange[range] = sampleTs;          // NEW
+		  dueSamples.push({ range, ts: sampleTs });            
+		  this.lastSampleTsByRange[range] = sampleTs;          
 		}
 	  }
 
-	  // NEW: persist only when changed
+	  // Persist only when changed
 	  if (dueSamples.length > 0) {
 		await this.ctx.storage.put("lastSampleTsByRange", this.lastSampleTsByRange);
 	  }
 	}
-	// NEW: include latched outdoor values so Worker can build complete history snapshots
+	// Include latched outdoor values so Worker can build complete history snapshots
 	return json({ ok: true, dueSamples, lastOutdoor: this.lastOutdoor });
     }
 
@@ -316,46 +311,42 @@ export class WeatherDO {
  * Durable Object #2: WeatherHistoryDO (HISTORY, SQLite)
  * ============================================================================= */
 export class WeatherHistoryDO {
-  constructor(ctx, env) {
+  constructor(ctx){
     this.ctx = ctx;
-    this.env = env;
     this.sql = this.ctx.storage.sql;
 
 	this.ctx.blockConcurrencyWhile(async () => {
-	  // NEW: one table per range so each has its own ts primary key timeline
-	  this.sql.exec(`
-		CREATE TABLE IF NOT EXISTS samples_6h (
-		  ts INTEGER PRIMARY KEY,
-		  boot_id INTEGER,
-		  weather_json TEXT NOT NULL
-		);
-	  `);
-	  this.sql.exec(`
-		CREATE TABLE IF NOT EXISTS samples_24h (
-		  ts INTEGER PRIMARY KEY,
-		  boot_id INTEGER,
-		  weather_json TEXT NOT NULL
-		);
-	  `);
-	  this.sql.exec(`
-		CREATE TABLE IF NOT EXISTS samples_7d (
-		  ts INTEGER PRIMARY KEY,
-		  boot_id INTEGER,
-		  weather_json TEXT NOT NULL
-		);
-	  `);
+	  // One table per range so each has its own ts primary key timeline
+    // boot_id is stored for debugging device restarts; not used in charting.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS samples_6h (
+        ts INTEGER PRIMARY KEY,
+        boot_id INTEGER,
+        weather_json TEXT NOT NULL
+      );
+    `);
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS samples_24h (
+        ts INTEGER PRIMARY KEY,
+        boot_id INTEGER,
+        weather_json TEXT NOT NULL
+      );
+    `);
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS samples_7d (
+        ts INTEGER PRIMARY KEY,
+        boot_id INTEGER,
+        weather_json TEXT NOT NULL
+      );
+    `);
 
-	  // NEW: indexes (optional)
-	  this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_samples_6h_ts ON samples_6h(ts);`);
-	  this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_samples_24h_ts ON samples_24h(ts);`);
-	  this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_samples_7d_ts ON samples_7d(ts);`);
 	});
   }
 
   async fetch(request) {
     const url = new URL(request.url);
 
-	// NEW: POST /record_batch -> insert deterministic samples (0..3) in one request.
+	// POST /record_batch -> insert deterministic samples (0..3) in one request.
 	// This avoids any bucket/AVG logic: we store the snapshot at the exact aligned ts.
 	if (url.pathname === "/record_batch" && request.method === "POST") {
 	  const body = await request.json();
@@ -364,12 +355,12 @@ export class WeatherHistoryDO {
 	  const bootId = body?.boot_id ?? null;
 	  const weather = body?.weather ?? null;
 
-	  // NEW: require normalized weather object
+	  // Require normalized weather object
 	  if (!weather || typeof weather !== "object") {
 		return json({ error: "missing weather" }, 400);
 	  }
 
-	  // NEW: retention (keep 10 days)
+	  // Retention (keep 10 days)
 	  const RETENTION_SEC = 10 * 24 * 60 * 60;
 
 	  for (const s of samples) {
@@ -406,18 +397,18 @@ export class WeatherHistoryDO {
 
 	  const step = cfg.stepSec;
 
-	  // NEW: pick correct table
+	  // Pick correct table
 	  const table =
 		(range === "6h") ? "samples_6h" :
 		(range === "24h") ? "samples_24h" :
 		"samples_7d";
 
-	  // NEW: deterministic aligned window
+	  // Deterministic aligned window
 	  const now = Math.floor(Date.now() / 1000);
 	  const endTs = Math.floor(now / step) * step;
 	  const startTs = endTs - (cfg.maxSamples - 1) * step;
 
-	  // NEW: read stored samples
+	  // Read stored samples
 	  const rows = this.sql.exec(
 		`SELECT ts, boot_id, weather_json FROM ${table} WHERE ts >= ? AND ts <= ? ORDER BY ts ASC`,
 		startTs,
@@ -431,7 +422,7 @@ export class WeatherHistoryDO {
 		byTs.set(r.ts, { boot_id: r.boot_id ?? null, weather });
 	  }
 
-	  // NEW: return exactly N timestamps; missing ones are null-filled
+	  // Return exactly N timestamps; missing ones are null-filled
 	  const samples = [];
 	  for (let i = 0; i < cfg.maxSamples; i++) {
 		const ts = startTs + i * step;
@@ -472,14 +463,7 @@ export default {
 
     // POST /api/weather
     if (url.pathname === "/api/weather" && request.method === "POST") {
-      // FIX: ts must be defined before any logging uses it
       const ts = Math.floor(Date.now() / 1000);
-
-      console.log(
-        "[REAL-HIST]",
-        "HISTORY_ENABLED =", env.HISTORY_ENABLED,
-        "writing record ts =", ts
-      );
 
       let payload;
       try {
@@ -503,33 +487,33 @@ export default {
 	}));
 	if (!liveRes.ok) return liveRes;
 
-	// NEW: read deterministic sampling decisions from WeatherDO
+	// Read deterministic sampling decisions from WeatherDO
 	let dueSamples = [];
-	let lastOutdoor = null; // NEW
+	let lastOutdoor = null; 
 	try {
 	  const liveJson = await liveRes.json();
 	  dueSamples = Array.isArray(liveJson?.dueSamples) ? liveJson.dueSamples : [];
-	  lastOutdoor = liveJson?.lastOutdoor ?? null; // NEW: latched outdoor fallback
+	  lastOutdoor = liveJson?.lastOutdoor ?? null; // latched outdoor fallback
 	} catch {
 	  dueSamples = [];
 	  lastOutdoor = null;
 	}
 
 
-	// NEW: only write history if enabled AND any range is due
+	// Only write history if enabled AND any range is due
 	if (env.HISTORY_ENABLED === "true" && dueSamples.length > 0) {
-	  // NEW: use latched outdoor values if payload.shelly is missing at the boundary
+	  // Use latched outdoor values if payload.shelly is missing at the boundary
 	  const normalized = normalizeForHistory(payload, lastOutdoor);
 
-	  // NEW: batch write to History DO in background (single DO request)
+	  // Batch write to History DO in background (single DO request)
 	  ctx.waitUntil(
 		histStub.fetch(new Request("https://hist/record_batch", {
 		  method: "POST",
 		  headers: { "Content-Type": "application/json" },
 		  body: JSON.stringify({
-			samples: dueSamples,            // NEW: [{range, ts}, ...]
-			boot_id: record.boot_id ?? null, // NEW: preserve boot_id if available
-			weather: normalized              // NEW: normalized snapshot
+			samples: dueSamples,            // [{range, ts}, ...]
+			boot_id: record.boot_id ?? null, // preserve boot_id if available
+			weather: normalized              // normalized snapshot
 		  }),
 		}))
 	  );
@@ -559,7 +543,7 @@ export default {
       const requestedMode =
         url.searchParams.get("mode") === "real" ? "REAL" : "SIMULATED";
 
-      // SIMULATED is always allowed
+      // DEV: simulated history (UI testing) when mode is not "real"
       if (requestedMode === "SIMULATED") {
         return await getSimulatedHistory(range);
       }

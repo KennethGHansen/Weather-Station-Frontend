@@ -20,16 +20,6 @@
     "HISTORY_ENABLED": "true"
   },
 
-  // ---------------------------------------------------------------------------
-  // KV namespaces
-  // ---------------------------------------------------------------------------
-  "kv_namespaces": [
-    {
-      "id": "acd6a77f01684e34bd57863bf27f4284",
-      "binding": "WEATHER_KV"
-    }
-  ],
-
   // ===========================================================================
   // DURABLE OBJECT BINDINGS
   // - WEATHER_DO         = existing (KV-backed) DO used for "latest"
@@ -59,7 +49,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["WeatherDO"]
+      "new_classes": ["WeatherDO"]
     },
     {
       "tag": "v2",
