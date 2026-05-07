@@ -781,10 +781,10 @@ function renderTemperatureChart(historyData) {
             tension: 0,
             spanGaps: false,
             showLine: true,
-			// NEW: show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 2),
+			// Show a dot for real samples, hide points for nulls
+			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
             pointHoverRadius: 6,
-            borderWidth: 2
+            borderWidth: 1
           },
           {
             label: "Outdoor",
@@ -794,10 +794,10 @@ function renderTemperatureChart(historyData) {
             tension: 0,
             spanGaps: false,
             showLine: true,
-            // NEW: show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 2),
-            pointHoverRadius: 3,
-            borderWidth: 2
+            // Show a dot for real samples, hide points for nulls
+			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+            pointHoverRadius: 6,
+            borderWidth: 1
           }
         ]
       },
@@ -819,13 +819,42 @@ function renderTemperatureChart(historyData) {
               autoSkip: false,
               maxRotation: 0,
               callback: xAxis.tickCallback
+            },
+
+            // Only draw vertical grid lines where x-axis labels exist
+            grid: {
+              lineWidth: 1,
+              color: (context) => {
+                const label = context?.tick?.label;
+                return label
+                  ? "rgba(148,163,184,0.16)"  // subtle but readable
+                  : "rgba(0,0,0,0)";          // hide non-labeled grid lines
+              },
+              drawBorder: false
             }
           },
           y: {
             min: 0,
             max: 40,
             ticks: { color: "#9ca3af" },
-            title: { display: true, text: "°C", color: "#9ca3af" }
+            title: { display: true, text: "°C", color: "#9ca3af" },
+
+            // Only draw visible grid lines at tick values (the labeled y-values)
+            grid: {
+              lineWidth: 1,
+
+              // Scriptable color: tick gridlines get a slightly stronger slate tone
+              // (still not bright/white). Everything else is transparent.
+              color: (context) => {
+                // context.tick.value is the numeric y tick value for this grid line
+                const v = context?.tick?.value;
+                if (typeof v === "number") {
+                  return "rgba(148,163,184,0.22)"; // visible, subtle (slate-ish)
+                }
+                return "rgba(0,0,0,0)"; // fallback: hide non-tick lines
+              },
+              drawBorder: false
+            }
           }
         }
       }
@@ -894,10 +923,10 @@ function renderHumidityChart(historyData) {
             tension: 0,
             spanGaps: false,
             showLine: true,
-			// NEW: show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 2),
+			// Show a dot for real samples, hide points for nulls
+			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
 			pointHoverRadius: 6,
-            borderWidth: 2
+            borderWidth: 1
           },
           {
             label: "Outdoor",
@@ -907,10 +936,10 @@ function renderHumidityChart(historyData) {
             tension: 0,
             spanGaps: false,
             showLine: true,
-            // NEW: show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 2),
+            // Show a dot for real samples, hide points for nulls
+			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
             pointHoverRadius: 6,
-            borderWidth: 2
+            borderWidth: 1
           }
         ]
       },
@@ -933,13 +962,35 @@ function renderHumidityChart(historyData) {
               autoSkip: false,
               maxRotation: 0,
               callback: xAxis.tickCallback
+            },
+            grid: {
+              lineWidth: 1,
+              color: (context) => {
+                const label = context?.tick?.label;
+                return label
+                  ? "rgba(148,163,184,0.16)"
+                  : "rgba(0,0,0,0)";
+              },
+              drawBorder: false
             }
           },
           y: {
             min: 0,
             max: 100,
             ticks: { color: "#9ca3af" },
-            title: { display: true, text: "%", color: "#9ca3af" }
+            title: { display: true, text: "%", color: "#9ca3af" },
+
+            grid: {
+              lineWidth: 1,
+              color: (context) => {
+                const v = context?.tick?.value;
+                if (typeof v === "number") {
+                  return "rgba(148,163,184,0.22)";
+                }
+                return "rgba(0,0,0,0)";
+              },
+              drawBorder: false
+            }
           }
         }
       }
@@ -1001,10 +1052,10 @@ function renderPressureChart(historyData) {
             tension: 0,
             spanGaps: false,
             showLine: true, 
-			// NEW: show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 2),
+			// Show a dot for real samples, hide points for nulls
+			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
             pointHoverRadius: 6,
-            borderWidth: 2
+            borderWidth: 1
           }
         ]
       },
@@ -1027,13 +1078,35 @@ function renderPressureChart(historyData) {
               autoSkip: false,
               maxRotation: 0,
               callback: xAxis.tickCallback
+            },
+            grid: {
+              lineWidth: 1,
+              color: (context) => {
+                const label = context?.tick?.label;
+                return label
+                  ? "rgba(148,163,184,0.16)"
+                  : "rgba(0,0,0,0)";
+              },
+              drawBorder: false
             }
           },
           y: {
             min: 950,
             max: 1050,
             ticks: { color: "#9ca3af" },
-            title: { display: true, text: "hPa", color: "#9ca3af" }
+            title: { display: true, text: "hPa", color: "#9ca3af" },
+
+            grid: {
+              lineWidth: 1,
+              color: (context) => {
+                const v = context?.tick?.value;
+                if (typeof v === "number") {
+                  return "rgba(148,163,184,0.22)";
+                }
+                return "rgba(0,0,0,0)";
+              },
+              drawBorder: false
+            }
           }
         }
       }
