@@ -57,7 +57,6 @@ async function loadHistoryOnce() {
     //   /api/history?range=24h&amp;mode=sim
     //   /api/history?range=24h&amp;mode=real
     // ============================================================
-
 	const res = await fetch(
 	  `/api/history?range=${historyRange}&mode=${encodeURIComponent(mode)}&t=${Date.now()}`,
 	  { cache: "no-store" }
@@ -92,8 +91,19 @@ async function loadHistoryOnce() {
 /* ============================================================================
  * HISTORY LIVE UPDATE (EXACTLY ONE TIMER)
  * ========================================================================== */
-
 let historyPollTimer = null;
+
+// ============================================================================
+// HISTORY POLLING POLICY (single source of truth)
+// - Adjust intervals here without hunting through code.
+// - Values are milliseconds.
+// ============================================================================
+const HISTORY_POLL_MS_BY_RANGE = {
+  "6h":  15000,
+  "24h": 15000,
+  "7d":  60000,
+  "30d": 0       // 0 => no polling after the initial load (fetch-on-enter only)
+};
 
 function startHistoryPolling() {
   // HARD reset (never rely on "if (timer)")
@@ -102,10 +112,15 @@ function startHistoryPolling() {
   // Immediate fetch
   loadHistoryOnce();
 
-  // Single, controlled interval
-  historyPollTimer = setInterval(() => {
-    loadHistoryOnce();
-  }, 15000);
+  // Single, controlled interval (range-dependent)
+    const pollMs = HISTORY_POLL_MS_BY_RANGE[historyRange] ?? 15000;
+
+  // If 0, we do fetch-on-enter only (no background polling)
+  if (pollMs > 0) {
+    historyPollTimer = setInterval(() => {
+      loadHistoryOnce();
+    }, pollMs);
+  }
 }
 
 function stopHistoryPolling() {
@@ -185,7 +200,7 @@ function formatXAxisLabel(ts, range) {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
-  // 7d: date-only labels
+   // 7d + 30d: date-only labels
   return d.toLocaleDateString([], { day: "2-digit", month: "short" });
 }
 
@@ -665,9 +680,11 @@ timeButtons.forEach((btn) => {
 
     historyRange = btn.textContent.trim();
 
-    // Then redraw charts
+    // Then redraw charts + apply the polling policy for the selected range
     if (!historyPage.classList.contains("hidden")) {
-      loadHistoryOnce();
+      // Restart polling so the new range's interval takes effect.
+      // startHistoryPolling() already performs the immediate fetch.
+      startHistoryPolling();
     }
   });
 });
@@ -978,7 +995,7 @@ function renderHumidityChart(historyData) {
             min: 0,
             max: 100,
             ticks: { color: "#9ca3af" },
-            title: { display: true, text: "%", color: "#9ca3af" },
+            title: { display: true, text: "%RH", color: "#9ca3af" },
 
             grid: {
               lineWidth: 1,

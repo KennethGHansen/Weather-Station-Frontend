@@ -33,9 +33,9 @@ const HISTORY_CFG = {
   "6h":  { stepSec: 5 * 60,    maxSamples: 72},
   "24h": { stepSec: 10 * 60,   maxSamples: 144},
   "7d":  { stepSec: 60 * 60,   maxSamples: 168},
+  "30d": { stepSec: 60 * 60,   maxSamples: 24 * 31}, // hourly, 1 month
 };
 
- 
   // Normalize the incoming device payload to the stable history schema.
   // lastOutdoor provides latched Shelly values when a boundary sample lands between updates.
 function normalizeForHistory(payload, lastOutdoor = null) {
@@ -221,7 +221,7 @@ export class WeatherDO {
 	this.lastOutdoor = { temperature_c: null, humidity_pct: null };
 
 	// Deterministic sampling state per range (aligned to step boundaries)
-	this.lastSampleTsByRange = { "6h": 0, "24h": 0, "7d": 0 };
+	this.lastSampleTsByRange = { "6h": 0, "24h": 0, "7d": 0, "30d": 0 };
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.latest = await this.ctx.storage.get("latest");
@@ -276,7 +276,7 @@ export class WeatherDO {
 	const dueSamples = []; 
 
 	if (typeof nowTs === "number") {
-	  for (const range of ["6h", "24h", "7d"]) {
+	  for (const range of ["6h", "24h", "7d", "30d"]) {
 		const step = HISTORY_CFG[range].stepSec;               
 		const sampleTs = Math.floor(nowTs / step) * step;      // aligned timestamp
 		const lastTs = this.lastSampleTsByRange?.[range] ?? 0; 
@@ -315,32 +315,39 @@ export class WeatherHistoryDO {
     this.ctx = ctx;
     this.sql = this.ctx.storage.sql;
 
-	this.ctx.blockConcurrencyWhile(async () => {
-	  // One table per range so each has its own ts primary key timeline
-    // boot_id is stored for debugging device restarts; not used in charting.
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS samples_6h (
-        ts INTEGER PRIMARY KEY,
-        boot_id INTEGER,
-        weather_json TEXT NOT NULL
-      );
-    `);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS samples_24h (
-        ts INTEGER PRIMARY KEY,
-        boot_id INTEGER,
-        weather_json TEXT NOT NULL
-      );
-    `);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS samples_7d (
-        ts INTEGER PRIMARY KEY,
-        boot_id INTEGER,
-        weather_json TEXT NOT NULL
-      );
-    `);
+    this.ctx.blockConcurrencyWhile(async () => {
+      // One table per range so each has its own ts primary key timeline
+      // boot_id is stored for debugging device restarts; not used in charting.
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS samples_6h (
+          ts INTEGER PRIMARY KEY,
+          boot_id INTEGER,
+          weather_json TEXT NOT NULL
+        );
+      `);
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS samples_24h (
+          ts INTEGER PRIMARY KEY,
+          boot_id INTEGER,
+          weather_json TEXT NOT NULL
+        );
+      `);
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS samples_7d (
+          ts INTEGER PRIMARY KEY,
+          boot_id INTEGER,
+          weather_json TEXT NOT NULL
+        );
+      `);
 
-	});
+      this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS samples_30d (
+        ts INTEGER PRIMARY KEY,
+        boot_id INTEGER,
+        weather_json TEXT NOT NULL
+      );
+    `);
+    });
   }
 
   async fetch(request) {
@@ -367,13 +374,14 @@ export class WeatherHistoryDO {
 		const range = s?.range;
 		const ts = s?.ts;
 
-		if (!["6h", "24h", "7d"].includes(range)) continue;
+		if (!["6h", "24h", "7d", "30d"].includes(range)) continue;
 		if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
 
-		const table =
-		  (range === "6h") ? "samples_6h" :
-		  (range === "24h") ? "samples_24h" :
-		  "samples_7d";
+    const table =
+      (range === "6h")  ? "samples_6h"  :
+      (range === "24h") ? "samples_24h" :
+      (range === "7d")  ? "samples_7d"  :
+      "samples_30d";
 
 		this.sql.exec(
 		  `INSERT OR REPLACE INTO ${table} (ts, boot_id, weather_json) VALUES (?, ?, ?)`,
@@ -398,10 +406,11 @@ export class WeatherHistoryDO {
 	  const step = cfg.stepSec;
 
 	  // Pick correct table
-	  const table =
-		(range === "6h") ? "samples_6h" :
-		(range === "24h") ? "samples_24h" :
-		"samples_7d";
+    const table =
+      (range === "6h")  ? "samples_6h"  :
+      (range === "24h") ? "samples_24h" :
+      (range === "7d")  ? "samples_7d"  :
+      "samples_30d";
 
 	  // Deterministic aligned window
 	  const now = Math.floor(Date.now() / 1000);
@@ -533,7 +542,7 @@ export default {
       const range = url.searchParams.get("range");
 
       // Validate input early
-      if (!["6h", "24h", "7d"].includes(range)) {
+      if (!["6h", "24h", "7d", "30d"].includes(range)) {
         return json({ error: "invalid range" }, 400);
       }
 
