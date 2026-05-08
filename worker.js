@@ -34,6 +34,7 @@ const HISTORY_CFG = {
   "24h": { stepSec: 10 * 60,   maxSamples: 144},
   "7d":  { stepSec: 60 * 60,   maxSamples: 168},
   "30d": { stepSec: 60 * 60,   maxSamples: 24 * 31}, // hourly, 1 month
+  "1y":  { stepSec: 60 * 60,   maxSamples: 24 * 366}, // hourly, rolling year
 };
 
   // Normalize the incoming device payload to the stable history schema.
@@ -221,7 +222,7 @@ export class WeatherDO {
 	this.lastOutdoor = { temperature_c: null, humidity_pct: null };
 
 	// Deterministic sampling state per range (aligned to step boundaries)
-	this.lastSampleTsByRange = { "6h": 0, "24h": 0, "7d": 0, "30d": 0 };
+	this.lastSampleTsByRange = { "6h": 0, "24h": 0, "7d": 0, "30d": 0, "1y": 0 };
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.latest = await this.ctx.storage.get("latest");
@@ -276,7 +277,7 @@ export class WeatherDO {
 	const dueSamples = []; 
 
 	if (typeof nowTs === "number") {
-	  for (const range of ["6h", "24h", "7d", "30d"]) {
+	  for (const range of ["6h", "24h", "7d", "30d", "1y"]) {
 		const step = HISTORY_CFG[range].stepSec;               
 		const sampleTs = Math.floor(nowTs / step) * step;      // aligned timestamp
 		const lastTs = this.lastSampleTsByRange?.[range] ?? 0; 
@@ -347,6 +348,13 @@ export class WeatherHistoryDO {
         weather_json TEXT NOT NULL
       );
     `);
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS samples_1y (
+          ts INTEGER PRIMARY KEY,
+          boot_id INTEGER,
+          weather_json TEXT NOT NULL
+        );
+      `);
     });
   }
 
@@ -367,21 +375,27 @@ export class WeatherHistoryDO {
 		return json({ error: "missing weather" }, 400);
 	  }
 
-	  // Retention (keep 10 days)
-	  const RETENTION_SEC = 10 * 24 * 60 * 60;
+	  const RETENTION_SEC_BY_RANGE = {
+      "6h":  2  * 24 * 60 * 60,   // keep 2 days
+      "24h": 3  * 24 * 60 * 60,   // keep 3 days
+      "7d":  10 * 24 * 60 * 60,   // keep 10 days
+      "30d": 40 * 24 * 60 * 60,   // keep ~40 days
+      "1y":  380 * 24 * 60 * 60,  // keep ~1 year
+    };
 
 	  for (const s of samples) {
 		const range = s?.range;
 		const ts = s?.ts;
 
-		if (!["6h", "24h", "7d", "30d"].includes(range)) continue;
+		if (!["6h", "24h", "7d", "30d", "1y"].includes(range)) continue;
 		if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
 
     const table =
       (range === "6h")  ? "samples_6h"  :
       (range === "24h") ? "samples_24h" :
       (range === "7d")  ? "samples_7d"  :
-      "samples_30d";
+      (range === "30d") ? "samples_30d" :
+      "samples_1y";
 
 		this.sql.exec(
 		  `INSERT OR REPLACE INTO ${table} (ts, boot_id, weather_json) VALUES (?, ?, ?)`,
@@ -390,7 +404,8 @@ export class WeatherHistoryDO {
 		  JSON.stringify(weather)
 		);
 
-		const cutoff = ts - RETENTION_SEC;
+		const retentionSec = RETENTION_SEC_BY_RANGE[range] ?? 0;
+    const cutoff = retentionSec > 0 ? ts - retentionSec : ts;
 		this.sql.exec(`DELETE FROM ${table} WHERE ts < ?`, cutoff);
 	  }
 
@@ -542,7 +557,7 @@ export default {
       const range = url.searchParams.get("range");
 
       // Validate input early
-      if (!["6h", "24h", "7d", "30d"].includes(range)) {
+      if (!["6h", "24h", "7d", "30d", "1y"].includes(range)) {
         return json({ error: "invalid range" }, 400);
       }
 
