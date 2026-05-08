@@ -13,6 +13,10 @@ reqest limit of 100k (Cloudflare free subscription). By changing the history to 
 The live DO updates every 3 seconds so that is the limiting factor, but we will see if it becomes a problem with more viewers (There is a ~50k static load that i dont know where comes from on the live DO)
 So, we are running now, but I will be evaluating the request to see if we perhaps need to lower the live sample rate.
 
+Status: 08/05-2026
+Frontend running with live 3 sec update and history UI updates with polling rate 6h: every 5 minutes, 24h: every 10 minutes, 7d, every hour, 30d, every hour. I also implemented the data sampling of 1year with 1 hour sample rate. It is only backend yet. I still need to figure out how the graph should look, as almost 9000 samples over a year will be very noisy to look at all at once (Ideas like dayly average, min, max perhaps). So this is still a work in progress.
+I also figured out that the 50k daily request stems directly from the calling of weatherDO in the live 3 second update. This could mean some problems in the future under the free Cloudflare subscription im using, but that can easily be helped by reducing the polling rate. This could also be done for the different history windows, but i will look into this if it becomes an issue in the future)
+
 https://weather-station.kghansen123.workers.dev/
 
 Instruction for deploying new code:
