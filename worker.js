@@ -216,6 +216,22 @@ export class WeatherDO {
   constructor(ctx) {
     this.ctx = ctx;
     this.latest = null;
+
+    // -----------------------------------------------------------------------
+    // Latest snapshot write throttling (IMPORTANT)
+    //
+    // Why: In SQLite-backed Durable Objects, the KV-style storage API
+    // (ctx.storage.get/put/delete/list) is implemented by writing to a hidden
+    // SQLite table called __cf_kv. Those writes count toward rows_written. [1](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+    //
+    // We want the "latest weather" to be fresh for every request, but we do NOT
+    // need every 3-second update to be durable. So:
+    //   - Always update this.latest in memory
+    //   - Only checkpoint to durable storage every N seconds (default 60s)
+    // -----------------------------------------------------------------------
+    this.latestDirty = false;              // true when in-memory latest changed since last checkpoint
+    this.lastLatestPersistMs = 0;          // last time we persisted "latest" (ms since epoch)
+    this.latestPersistIntervalMs = 60_000; // checkpoint interval (60s). Adjust if desired.
 	
 	// Latched last-known outdoor readings (Shelly)
 	// These are used when sampling history so we don't miss outdoor data at boundaries.
@@ -226,13 +242,53 @@ export class WeatherDO {
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.latest = await this.ctx.storage.get("latest");
-
-	// Load latched outdoor readings from storage (if any)
-	this.lastOutdoor =(await this.ctx.storage.get("lastOutdoor")) ?? { temperature_c: null, humidity_pct: null };
+      // If we loaded a persisted latest value, consider it already checkpointed.
+      // (We will still overwrite it later, but only on the checkpoint interval.)
+      if (this.latest) {
+        this.latestDirty = false;
+        this.lastLatestPersistMs = Date.now();
+      }
+    // Load latched outdoor readings from storage (if any)
+    this.lastOutdoor =(await this.ctx.storage.get("lastOutdoor")) ?? { temperature_c: null, humidity_pct: null };
 	  
-	// Load per-range sampler state from storage
-    this.lastSampleTsByRange =(await this.ctx.storage.get("lastSampleTsByRange")) ?? { "6h": 0, "24h": 0, "7d": 0 };
+    //Load per-range sampler state from storage
+    this.lastSampleTsByRange = (await this.ctx.storage.get("lastSampleTsByRange")) ?? { "6h": 0, "24h": 0, "7d": 0, "30d": 0, "1y": 0 };
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // Persist "latest" to durable storage at a controlled rate.
+  //
+  // IMPORTANT:
+  // In SQLite-backed DOs, ctx.storage.put() writes to hidden SQLite table __cf_kv,
+  // and those writes count toward rows_written.
+  //
+  // - force=true: always write (used when we have never persisted yet)
+  // - otherwise: write only when dirty AND interval elapsed
+  // -----------------------------------------------------------------------
+  async maybePersistLatest(force = false) {
+    if (!this.latest) return;
+
+    // First-ever persist should not be delayed indefinitely.
+    if (this.lastLatestPersistMs === 0) force = true;
+
+    // If nothing changed, don't write unless forced.
+    if (!this.latestDirty && !force) return;
+
+    const now = Date.now();
+
+    // Throttle unless forced.
+    if (!force && (now - this.lastLatestPersistMs) < this.latestPersistIntervalMs) {
+      return;
+    }
+    
+    // Persist latest + lastOutdoor together on the checkpoint interval.
+    // In SQLite-backed DOs, KV API writes are stored in __cf_kv. [1](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+    await this.ctx.storage.put("latest", this.latest);
+    await this.ctx.storage.put("lastOutdoor", this.lastOutdoor);
+
+    this.lastLatestPersistMs = now;
+    this.latestDirty = false;
   }
 
   async fetch(request) {
@@ -247,64 +303,66 @@ export class WeatherDO {
         return json({ error: "invalid json" }, 400);
       }
 
+      // Always keep latest in memory (freshness)
       this.latest = record;
-      await this.ctx.storage.put("latest", record);
+      this.latestDirty = true;
 	  
-	  // Latch last-known outdoor readings whenever present in the incoming record
-	  // We latch from record.weather.shelly (the live payload) if it contains numbers.
-	  const sh = record?.weather?.shelly; 
-	  let outdoorChanged = false;          
+      // Latch last-known outdoor readings whenever present in the incoming record
+      // We latch from record.weather.shelly (the live payload) if it contains numbers.
+      const sh = record?.weather?.shelly;
 
-	  if (typeof sh?.temperature_c === "number") {
-		  this.lastOutdoor.temperature_c = sh.temperature_c;
-		  outdoorChanged = true;
-	  }
-	  if (typeof sh?.humidity_pct === "number") {
-		  this.lastOutdoor.humidity_pct = sh.humidity_pct;
-		  outdoorChanged = true;
-	  }
+      // Only mark changed if the new value differs from what we already latched.
+      if (typeof sh?.temperature_c === "number" &&
+          sh.temperature_c !== this.lastOutdoor.temperature_c) {
+        this.lastOutdoor.temperature_c = sh.temperature_c;
+      }
 
-		// persist latches only when we actually updated them
-		if (outdoorChanged) {
-		  await this.ctx.storage.put("lastOutdoor", this.lastOutdoor);
-		}
-	  
+      if (typeof sh?.humidity_pct === "number" &&
+          sh.humidity_pct !== this.lastOutdoor.humidity_pct) {
+        this.lastOutdoor.humidity_pct = sh.humidity_pct;
+      }
 
-	// Deterministic sampling decisions (aligned to exact boundaries)
-	// - Returns 0..3 due samples (6h/24h/7d) to the Worker.
-	// - Each range writes exactly once per aligned timestamp.
-	const nowTs = record?.ts;
-	const dueSamples = []; 
+    // Do NOT persist lastOutdoor immediately.
+      // We checkpoint lastOutdoor together with "latest" inside maybePersistLatest()
+      // to avoid frequent rows_written. [1](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+      // If outdoorChanged is true, the updated values are already stored in memory
+      // checkpoint them together (throttled) to reduce rows_written. [1](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+      await this.maybePersistLatest(false);
 
-	if (typeof nowTs === "number") {
-	  for (const range of ["6h", "24h", "7d", "30d", "1y"]) {
-		const step = HISTORY_CFG[range].stepSec;               
-		const sampleTs = Math.floor(nowTs / step) * step;      // aligned timestamp
-		const lastTs = this.lastSampleTsByRange?.[range] ?? 0; 
+      // Deterministic sampling decisions (aligned to exact boundaries)
+      // - Returns 0..3 due samples (6h/24h/7d) to the Worker.
+      // - Each range writes exactly once per aligned timestamp.
+      const nowTs = record?.ts;
+      const dueSamples = []; 
 
-		if (sampleTs > lastTs) {
-		  dueSamples.push({ range, ts: sampleTs });            
-		  this.lastSampleTsByRange[range] = sampleTs;          
-		}
-	  }
+      if (typeof nowTs === "number") {
+        for (const range of Object.keys(HISTORY_CFG)) {
+        const step = HISTORY_CFG[range].stepSec;               
+        const sampleTs = Math.floor(nowTs / step) * step;      // aligned timestamp
+        const lastTs = this.lastSampleTsByRange?.[range] ?? 0; 
 
-	  // Persist only when changed
-	  if (dueSamples.length > 0) {
-		await this.ctx.storage.put("lastSampleTsByRange", this.lastSampleTsByRange);
-	  }
-	}
+        if (sampleTs > lastTs) {
+          dueSamples.push({ range, ts: sampleTs });            
+          this.lastSampleTsByRange[range] = sampleTs;          
+        }
+        }
+
+        // Persist only when changed
+        if (dueSamples.length > 0) {
+        await this.ctx.storage.put("lastSampleTsByRange", this.lastSampleTsByRange);
+        }
+      }
 	// Include latched outdoor values so Worker can build complete history snapshots
 	return json({ ok: true, dueSamples, lastOutdoor: this.lastOutdoor });
     }
 
-    // GET /latest -> return latest
-    if (url.pathname === "/latest" && request.method === "GET") {
-      if (!this.latest) this.latest = await this.ctx.storage.get("latest");
-      if (!this.latest) return json({ error: "no data yet" }, 404);
-      return json(this.latest);
-    }
-
-    return json({ error: "not found" }, 404);
+  // GET /latest -> return latest
+  if (url.pathname === "/latest" && request.method === "GET") {
+    if (!this.latest) this.latest = await this.ctx.storage.get("latest");
+    if (!this.latest) return json({ error: "no data yet" }, 404);
+    return json(this.latest);
+  }
+  return json({ error: "not found" }, 404);
   }
 }
 
@@ -357,7 +415,7 @@ export class WeatherHistoryDO {
       `);
     });
   }
-
+  
   async fetch(request) {
     const url = new URL(request.url);
 
@@ -425,7 +483,8 @@ export class WeatherHistoryDO {
       (range === "6h")  ? "samples_6h"  :
       (range === "24h") ? "samples_24h" :
       (range === "7d")  ? "samples_7d"  :
-      "samples_30d";
+      (range === "30d") ? "samples_30d" :
+      "samples_1y";
 
 	  // Deterministic aligned window
 	  const now = Math.floor(Date.now() / 1000);
@@ -582,6 +641,9 @@ export default {
         new Request(`https://hist/history?range=${encodeURIComponent(range)}`, { method: "GET" })
       );
 
+      if (!res.ok) {
+        return json({ error: "history DO fetch failed", status: res.status }, res.status);
+      }
       const data = await res.json();
       return json({ range, samples: data.samples ?? [] });
     }
