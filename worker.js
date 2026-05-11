@@ -51,11 +51,15 @@ function normalizeForHistory(payload, lastOutdoor = null) {
     (typeof payload?.raw?.humidity_pct === "number") ? payload.raw.humidity_pct :
     null;
 
-  const pressurePa =
-    (typeof payload?.pressure === "number") ? payload.pressure :
-    (typeof payload?.derived?.sea_level_pressure_pa === "number") ? payload.derived.sea_level_pressure_pa :
-    (typeof payload?.raw?.pressure_pa === "number") ? payload.raw.pressure_pa :
-    null;
+	// Pressure MUST always be SEA-LEVEL compensated.
+	// Raw station pressure must never be used for history or charts.
+	//
+	// Rule:
+	// - Accept only derived.sea_level_pressure_pa.
+	// - If it is missing, store null (not raw pressure).
+	const pressurePa =
+	  (typeof payload?.derived?.sea_level_pressure_pa === "number") ? payload.derived.sea_level_pressure_pa
+	: null;
 
 	const outTemp =
 	  (typeof payload?.shelly?.temperature_c === "number") ? payload.shelly.temperature_c :
@@ -294,6 +298,31 @@ export class WeatherDO {
   async fetch(request) {
     const url = new URL(request.url);
 
+    // ---------------------------------------------------------------------
+    // POST /purge  (ADMIN)
+    // Clears all durable + in-memory state in WeatherDO:
+    // - latest (durable)
+    // - lastOutdoor (durable)
+    // - lastSampleTsByRange (durable)
+    // - plus in-memory mirrors
+    // ---------------------------------------------------------------------
+    if (url.pathname === "/purge" && request.method === "POST") {
+      // Durable storage keys
+      await this.ctx.storage.delete("latest");
+      await this.ctx.storage.delete("lastOutdoor");
+      await this.ctx.storage.delete("lastSampleTsByRange");
+
+      // In-memory state
+      this.latest = null;
+      this.latestDirty = false;
+      this.lastLatestPersistMs = 0;
+
+      this.lastOutdoor = { temperature_c: null, humidity_pct: null };
+      this.lastSampleTsByRange = { "6h": 0, "24h": 0, "7d": 0, "30d": 0, "1y": 0 };
+
+      return json({ ok: true, purged: "WeatherDO" });
+    }
+
     // POST /update -> store latest
     if (url.pathname === "/update" && request.method === "POST") {
       let record;
@@ -310,17 +339,19 @@ export class WeatherDO {
       // Latch last-known outdoor readings whenever present in the incoming record
       // We latch from record.weather.shelly (the live payload) if it contains numbers.
       const sh = record?.weather?.shelly;
+	  const shellyReady = (sh?.ready === true);
 
       // Only mark changed if the new value differs from what we already latched.
-      if (typeof sh?.temperature_c === "number" &&
-          sh.temperature_c !== this.lastOutdoor.temperature_c) {
-        this.lastOutdoor.temperature_c = sh.temperature_c;
-      }
-
-      if (typeof sh?.humidity_pct === "number" &&
-          sh.humidity_pct !== this.lastOutdoor.humidity_pct) {
-        this.lastOutdoor.humidity_pct = sh.humidity_pct;
-      }
+	  if (shellyReady &&
+		typeof sh?.temperature_c === "number" &&
+		sh.temperature_c !== this.lastOutdoor.temperature_c) {
+	  this.lastOutdoor.temperature_c = sh.temperature_c;
+	  }
+	  if (shellyReady &&
+		typeof sh?.humidity_pct === "number" &&
+		sh.humidity_pct !== this.lastOutdoor.humidity_pct) {
+	    this.lastOutdoor.humidity_pct = sh.humidity_pct;
+	  }
 
     // Do NOT persist lastOutdoor immediately.
       // We checkpoint lastOutdoor together with "latest" inside maybePersistLatest()
@@ -418,6 +449,20 @@ export class WeatherHistoryDO {
   
   async fetch(request) {
     const url = new URL(request.url);
+
+    // ---------------------------------------------------------------------
+    // POST /purge  (ADMIN)
+    // Deletes all rows from all history tables so graphs start fresh.
+    // ---------------------------------------------------------------------
+    if (url.pathname === "/purge" && request.method === "POST") {
+      this.sql.exec(`DELETE FROM samples_6h;`);
+      this.sql.exec(`DELETE FROM samples_24h;`);
+      this.sql.exec(`DELETE FROM samples_7d;`);
+      this.sql.exec(`DELETE FROM samples_30d;`);
+      this.sql.exec(`DELETE FROM samples_1y;`);
+
+      return json({ ok: true, purged: "WeatherHistoryDO" });
+    }
 
 	// POST /record_batch -> insert deterministic samples (0..3) in one request.
 	// This avoids any bucket/AVG logic: we store the snapshot at the exact aligned ts.
@@ -544,6 +589,34 @@ export default {
         ? env.WEATHER_HISTORY_DO.get(env.WEATHER_HISTORY_DO.idFromName("default"))
         : null;
 
+    // ---------------------------------------------------------------------
+    // POST /api/purge  (ADMIN)
+    // Purges WeatherDO + WeatherHistoryDO in one call.
+    //
+    // Security:
+    // - Requires secret PURGE_TOKEN (recommended by Cloudflare) [1](https://developers.cloudflare.com/workers/configuration/secrets/)
+    // - Client must send header: X-Purge-Token: <token>
+    // ---------------------------------------------------------------------
+    if (url.pathname === "/api/purge" && request.method === "POST") {
+      const token = request.headers.get("X-Purge-Token");
+
+      if (!env.PURGE_TOKEN || token !== env.PURGE_TOKEN) {
+        return json({ error: "unauthorized" }, 401);
+      }
+
+      // Purge WeatherDO
+      const r1 = await liveStub.fetch(new Request("https://do/purge", { method: "POST" }));
+      if (!r1.ok) return json({ error: "WeatherDO purge failed", status: r1.status }, 500);
+
+      // Purge HistoryDO (only if enabled/bound)
+      if (histStub) {
+        const r2 = await histStub.fetch(new Request("https://hist/purge", { method: "POST" }));
+        if (!r2.ok) return json({ error: "WeatherHistoryDO purge failed", status: r2.status }, 500);
+      }
+
+      return json({ ok: true, purged: true });
+    } 
+        
     // POST /api/weather
     if (url.pathname === "/api/weather" && request.method === "POST") {
       const ts = Math.floor(Date.now() / 1000);
