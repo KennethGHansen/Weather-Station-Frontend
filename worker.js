@@ -61,15 +61,26 @@ function normalizeForHistory(payload, lastOutdoor = null) {
 	  (typeof payload?.derived?.sea_level_pressure_pa === "number") ? payload.derived.sea_level_pressure_pa
 	: null;
 
+	// ------------------------------------------------------------
+	// Outdoor (Shelly) history handling
+	//
+	// Rule:
+	// - ONLY store value when Shelly explicitly reports ready=true
+	// - Otherwise store NULL (no fallback, no latching)
+	//
+	// This ensures gaps appear in charts instead of fake values
+	// ------------------------------------------------------------
+	const shellyReady = (payload?.shelly?.ready === true);
+
 	const outTemp =
-	  (typeof payload?.shelly?.temperature_c === "number") ? payload.shelly.temperature_c :
-	  (typeof lastOutdoor?.temperature_c === "number") ? lastOutdoor.temperature_c :
-	  null;
+	  (shellyReady && typeof payload?.shelly?.temperature_c === "number")
+		? payload.shelly.temperature_c
+		: null;
 
 	const outHum =
-	  (typeof payload?.shelly?.humidity_pct === "number") ? payload.shelly.humidity_pct :
-	  (typeof lastOutdoor?.humidity_pct === "number") ? lastOutdoor.humidity_pct :
-	  null;
+	  (shellyReady && typeof payload?.shelly?.humidity_pct === "number")
+		? payload.shelly.humidity_pct
+		: null;
 
   return {
     temp,
