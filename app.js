@@ -102,7 +102,8 @@ const HISTORY_POLL_MS_BY_RANGE = {
   "6h":  15000,
   "24h": 15000,
   "7d":  60000,
-  "30d": 0       // 0 => no polling after the initial load (fetch-on-enter only)
+  "30d": 0,       // 0 => no polling after the initial load (fetch-on-enter only)
+  "1y":  0   // 1y = fetch-on-enter only (no polling)
 };
 
 function startHistoryPolling() {
@@ -195,12 +196,17 @@ setInterval(tickClock, 1000);
 function formatXAxisLabel(ts, range) {
   const d = new Date(ts * 1000);
 
-  // 6h + 24h: ALWAYS time labels (including the first tick)
+  // 1y: month-only labels
+  if (range === "1y") {
+    return d.toLocaleDateString([], { month: "short" });
+  }
+
+  // 6h + 24h: time labels
   if (range === "6h" || range === "24h") {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
-   // 7d + 30d: date-only labels
+  // 7d + 30d: date labels
   return d.toLocaleDateString([], { day: "2-digit", month: "short" });
 }
 
@@ -211,6 +217,71 @@ function buildXAxis(historyData, range) {
     return { labels: [], tickCallback: () => "" };
   }
 
+  /* ------------------------------------------------------------
+   * 1y: show labels only at month changes
+   * - one point per day is already prepared by aggregateDailyMinMax()
+   * - label only when month differs from previous point
+   * ------------------------------------------------------------ */
+  if (range === "1y") {
+    const labels = historyData.map((p, i, arr) => {
+
+      // ------------------------------------------------------------
+      // Force timezone = Europe/Copenhagen for month logic
+      // ------------------------------------------------------------
+      const d = new Date(p.ts * 1000);
+
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Europe/Copenhagen",
+        year: "numeric",
+        month: "2-digit"
+      }).formatToParts(d);
+
+      const month = parts.find(p => p.type === "month").value;
+      const year  = parts.find(p => p.type === "year").value;
+
+      // First point always shows label
+      if (i === 0) {
+        return new Intl.DateTimeFormat("en-GB", {
+          timeZone: "Europe/Copenhagen",
+          month: "short"
+        }).format(d);
+      }
+
+      // Previous point
+      const prev = new Date(arr[i - 1].ts * 1000);
+
+      const prevParts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Europe/Copenhagen",
+        year: "numeric",
+        month: "2-digit"
+      }).formatToParts(prev);
+
+      const prevMonth = prevParts.find(p => p.type === "month").value;
+      const prevYear  = prevParts.find(p => p.type === "year").value;
+
+      // Label only when month changes (Copenhagen time)
+      const monthChanged =
+        month !== prevMonth || year !== prevYear;
+
+      return monthChanged
+        ? new Intl.DateTimeFormat("en-GB", {
+            timeZone: "Europe/Copenhagen",
+            month: "short"
+          }).format(d)
+        : "";
+    });
+
+    return {
+      labels,
+      tickCallback(value) {
+        return this.getLabelForValue(value) || "";
+      }
+    };
+  }
+
+  /* ------------------------------------------------------------
+   * Existing behavior for 6h / 24h / 7d / 30d
+   * ------------------------------------------------------------ */
   const indices = [];
   for (let i = 0; i < 6; i++) {
     indices.push(Math.round(i * (len - 1) / 5));
@@ -249,8 +320,8 @@ function buildXAxis(historyData, range) {
  * - Safe to remove without breaking charts (pure decoration)
  *
  * WHEN IT APPEARS:
- * - Only for 6h and 24h views
- * - Hidden for 7d (dates already visible there)
+ * - Only for 6h, 24h and 1 year views
+ * - Hidden for 7d, 30d (dates already visible there)
  *
  * HOW IT WORKS:
  * - Hooks into Chart.js `afterDatasetsDraw`
@@ -265,9 +336,10 @@ const leftDateStampPlugin = {
   afterDatasetsDraw(chart, args, pluginOptions) {
     const { ctx } = chart;
     const { range, firstTs, singleLine } = pluginOptions || {};
+    
+    // Active for 6h, 24h and 1y (year stamp)
+    if (range !== "6h" && range !== "24h" && range !== "1y") return;
 
-    // Only active for short‑range views
-    if (range !== "6h" && range !== "24h") return;
     if (!firstTs) return;
 
     const xScale = chart.scales?.x;
@@ -275,9 +347,55 @@ const leftDateStampPlugin = {
 
     // Convert first timestamp into date parts
     const d = new Date(firstTs * 1000);
+
+    // ------------------------------------------------------------
+    // Use Copenhagen timezone for stamp
+    // ------------------------------------------------------------
+    if (range === "1y") {
+
+      const yearText = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Copenhagen",
+        year: "numeric"
+      }).format(d);
+
+      ctx.save();
+      ctx.fillStyle = "#9ca3af";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+
+      const xScale = chart.scales?.x;
+      if (!xScale || !xScale.ticks?.length) return;
+
+      const tickFont = Chart.helpers.toFont(xScale.options.ticks.font);
+      ctx.font = tickFont.string;
+
+      const tickX = xScale.getPixelForTick(0);
+
+      const firstLabel = xScale.getLabelForValue(0) || "";
+      const labelWidth = firstLabel ? ctx.measureText(firstLabel).width : 0;
+
+      const yearWidth = ctx.measureText(yearText).width;
+
+      const GAP_PX = 8;
+      const x =
+        tickX -
+        (labelWidth / 2) -
+        GAP_PX -
+        (yearWidth / 2);
+
+      const y = xScale.bottom - 6;
+
+      ctx.fillText(yearText, x, y);
+      ctx.restore();
+
+      return;
+    }
+
+    // Existing behavior (6h / 24h)
     const dayText   = d.toLocaleDateString([], { day: "2-digit" });
     const monthText = d.toLocaleDateString([], { month: "short" });
     const oneLineText = `${dayText} ${monthText}`;
+
 
     // Use the same font as X‑axis labels for visual consistency
     const tickFont = Chart.helpers.toFont(xScale.options.ticks.font);
@@ -572,11 +690,148 @@ const btnHistory   = document.getElementById("btn-history");     // button user 
 const overviewPage = document.getElementById("overview-page");   // live dashboard section
 const historyPage  = document.getElementById("history-page");    // history placeholder section
 
+/* ============================================================================
+ * 1 YEAR DAILY AGGREGATION (frontend)
+ * ============================================================================
+ * 
+ * INPUT:
+ * - hourly samples from backend (range = "1y")
+ *
+ * OUTPUT:
+ * - one sample per day
+ * - each day contains min/max values
+ *
+ * RULES:
+ * - ignore null values
+ * - group by LOCAL DAY (Europe/Copenhagen via browser)
+ * - no backend dependency
+ * - pure transformation layer
+ * ============================================================================
+ */
+function aggregateDailyMinMax(historyData) {
+  const days = new Map();
+
+  // ------------------------------------------------------------
+  // Determine "today" in local browser time
+  // We will EXCLUDE all samples from the current day
+  // ------------------------------------------------------------
+  const nowParts = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Copenhagen",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+  }).formatToParts(new Date());
+
+const todayKey =
+  nowParts.find(p => p.type === "year").value + "-" +
+  nowParts.find(p => p.type === "month").value + "-" +
+  nowParts.find(p => p.type === "day").value;
+
+  for (const p of historyData) {
+    const ts = p?.ts;
+    if (typeof ts !== "number") continue;
+
+    // ------------------------------------------------------------
+    // Force timezone = Europe/Copenhagen (station location)
+    // ------------------------------------------------------------
+    const d = new Date(ts * 1000);
+
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Copenhagen",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(d);
+
+    // Build YYYY-MM-DD safely from parts
+    const key =
+      parts.find(p => p.type === "year").value + "-" +
+      parts.find(p => p.type === "month").value + "-" +
+      parts.find(p => p.type === "day").value;
+
+    // ------------------------------------------------------------
+    // EXCLUDE current (incomplete) day
+    // ------------------------------------------------------------
+    if (key === todayKey) continue;
+
+    if (!days.has(key)) {
+      days.set(key, {
+        ts: ts, // first occurrence (will be overwritten later)
+
+        temp_in_min: null,
+        temp_in_max: null,
+        temp_out_min: null,
+        temp_out_max: null,
+
+        hum_in_min: null,
+        hum_in_max: null,
+        hum_out_min: null,
+        hum_out_max: null,
+
+        press_min: null,
+        press_max: null,
+      });
+    }
+
+    const day = days.get(key);
+
+    // Always update ts so it ends up as LAST sample of the day
+    day.ts = ts;
+
+    // ------------------ TEMPERATURE ------------------
+    const tin = p?.weather?.temp;
+    if (typeof tin === "number") {
+      if (day.temp_in_min === null || tin < day.temp_in_min) day.temp_in_min = tin;
+      if (day.temp_in_max === null || tin > day.temp_in_max) day.temp_in_max = tin;
+    }
+
+    const tout = p?.weather?.shelly?.temperature_c;
+    if (typeof tout === "number") {
+      if (day.temp_out_min === null || tout < day.temp_out_min) day.temp_out_min = tout;
+      if (day.temp_out_max === null || tout > day.temp_out_max) day.temp_out_max = tout;
+    }
+
+    // ------------------ HUMIDITY ------------------
+    const hin = p?.weather?.hum;
+    if (typeof hin === "number") {
+      if (day.hum_in_min === null || hin < day.hum_in_min) day.hum_in_min = hin;
+      if (day.hum_in_max === null || hin > day.hum_in_max) day.hum_in_max = hin;
+    }
+
+    const hout = p?.weather?.shelly?.humidity_pct;
+    if (typeof hout === "number") {
+      if (day.hum_out_min === null || hout < day.hum_out_min) day.hum_out_min = hout;
+      if (day.hum_out_max === null || hout > day.hum_out_max) day.hum_out_max = hout;
+    }
+
+    // ------------------ PRESSURE ------------------
+    const pval = p?.weather?.pressure;
+    if (typeof pval === "number") {
+      if (day.press_min === null || pval < day.press_min) day.press_min = pval;
+      if (day.press_max === null || pval > day.press_max) day.press_max = pval;
+    }
+  }
+
+  // Convert map → sorted array (by ts)
+  return Array.from(days.values())
+    .sort((a, b) => a.ts - b.ts);
+}
+
 /* Render all charts in sync */
 function renderAllHistoryCharts(data) {
-  renderTemperatureChart(data);
-  renderHumidityChart(data);
-  renderPressureChart(data);
+  /* ------------------------------------------------------------------
+   * Select data source:
+   * - 1y  → aggregated daily min/max
+   * - else → raw data
+   * ------------------------------------------------------------------ */
+  const chartData =
+    (historyRange === "1y")
+      ? aggregateDailyMinMax(data)
+      : data;
+
+  renderTemperatureChart(chartData);
+  renderHumidityChart(chartData);
+  renderPressureChart(chartData);
 }
 
 // Guard against partial DOM load (static hosting / cache edge cases)
@@ -758,65 +1013,124 @@ function renderTemperatureChart(historyData) {
 
   const xAxis = buildXAxis(dataArr, historyRange);
   const labels = xAxis.labels;
-
-  const indoorTemps = dataArr.map(p =>
-    (typeof p?.weather?.temp === "number") ? p.weather.temp : null
-  );
-
-  // ---------------------------------------------------------------------------
-  // OUTDOOR TEMPERATURE SERIES (history)
-  // ---------------------------------------------------------------------------
-  // WHY THIS EXISTS:
-  // - Your backend (SIM + REAL) includes outdoor measurements under:
-  //     weather.shelly.temperature_c
-  // - Previously we hard-coded outdoorTemps to null, so the chart was blank.
-  //
-  // DESIGN RULES:
-  // 1) Use ONLY real numeric values.
-  // 2) If the value is missing, return null (so Chart.js shows a gap).
-  // 3) Do not convert units here (value is already °C).
-  // ---------------------------------------------------------------------------
-  const outdoorTemps = dataArr.map(p =>
-    (typeof p?.weather?.shelly?.temperature_c === "number")
-      ? p.weather.shelly.temperature_c
-      : null
-  );
-
   const firstTs = dataArr.length > 0 ? dataArr[0].ts : null;
+
+  /* ------------------------------------------------------------
+   * DATA SELECTION
+   * - 1y  → aggregated min/max fields
+   * - else → raw fields
+   * ------------------------------------------------------------ */
+  let indoorTemps, outdoorTemps;
+  let indoorMin, indoorMax, outdoorMin, outdoorMax;
+
+  if (historyRange === "1y") {
+
+    indoorMin = dataArr.map(p => p.temp_in_min ?? null);
+    indoorMax = dataArr.map(p => p.temp_in_max ?? null);
+
+    outdoorMin = dataArr.map(p => p.temp_out_min ?? null);
+    outdoorMax = dataArr.map(p => p.temp_out_max ?? null);
+
+  } else {
+
+    indoorTemps = dataArr.map(p =>
+      (typeof p?.weather?.temp === "number") ? p.weather.temp : null
+    );
+
+    // ---------------------------------------------------------------------------
+    // OUTDOOR TEMPERATURE SERIES (history)
+    // ---------------------------------------------------------------------------
+    // WHY THIS EXISTS:
+    // - Your backend (SIM + REAL) includes outdoor measurements under:
+    //     weather.shelly.temperature_c
+    // - Previously we hard-coded outdoorTemps to null, so the chart was blank.
+    //
+    // DESIGN RULES:
+    // 1) Use ONLY real numeric values.
+    // 2) If the value is missing, return null (so Chart.js shows a gap).
+    // 3) Do not convert units here (value is already °C).
+    // ---------------------------------------------------------------------------
+    outdoorTemps = dataArr.map(p =>
+      (typeof p?.weather?.shelly?.temperature_c === "number")
+        ? p.weather.shelly.temperature_c
+        : null
+    );
+  }
+
+  /* ------------------------------------------------------------------
+   * Build datasets once so BOTH create path and update path use
+   * exactly the same dataset structure.
+   * ------------------------------------------------------------------ */
+  const datasets = (historyRange === "1y") ? [
+
+    {
+      label: "Indoor Min",
+      data: indoorMin,
+      borderColor: "#38bdf8",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Indoor Max",
+      data: indoorMax,
+      borderColor: "#0ea5e9",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Outdoor Min",
+      data: outdoorMin,
+      borderColor: "#a78bfa",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Outdoor Max",
+      data: outdoorMax,
+      borderColor: "#7c3aed",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    }
+
+  ] : [
+
+    {
+      label: "Indoor",
+      data: indoorTemps,
+      borderColor: "#38bdf8",
+      backgroundColor: "rgba(56,189,248,0.12)",
+      tension: 0,
+      spanGaps: false,
+      showLine: true,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      pointHoverRadius: 6,
+      borderWidth: 1
+    },
+    {
+      label: "Outdoor",
+      data: outdoorTemps,
+      borderColor: "#a78bfa",
+      backgroundColor: "rgba(167,139,250,0.12)",
+      tension: 0,
+      spanGaps: false,
+      showLine: true,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      pointHoverRadius: 6,
+      borderWidth: 1
+    }
+
+  ];
 
   if (!tempChart) {
     tempChart = new Chart(canvas, {
       type: "line",
       data: {
         labels,
-        datasets: [
-          {
-            label: "Indoor",
-            data: indoorTemps,
-            borderColor: "#38bdf8",
-            backgroundColor: "rgba(56,189,248,0.12)",
-            tension: 0,
-            spanGaps: false,
-            showLine: true,
-			// Show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
-            pointHoverRadius: 6,
-            borderWidth: 1
-          },
-          {
-            label: "Outdoor",
-            data: outdoorTemps,
-            borderColor: "#a78bfa",
-            backgroundColor: "rgba(167,139,250,0.12)",
-            tension: 0,
-            spanGaps: false,
-            showLine: true,
-            // Show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
-            pointHoverRadius: 6,
-            borderWidth: 1
-          }
-        ]
+        datasets
       },
       options: {
         responsive: true,
@@ -879,9 +1193,75 @@ function renderTemperatureChart(historyData) {
     return;
   }
 
+  /* ------------------------------------------------------------------
+   * UPDATE EXISTING CHART INSTANCE
+   * - Needed because 1y uses 4 datasets, others use 2
+   * ------------------------------------------------------------------ */
   tempChart.data.labels = labels;
-  tempChart.data.datasets[0].data = indoorTemps;
-  tempChart.data.datasets[1].data = outdoorTemps;
+
+  if (historyRange === "1y") {
+    tempChart.data.datasets = [
+      {
+        label: "Indoor Min",
+        data: indoorMin,
+        borderColor: "#38bdf8",
+        tension: 0,
+        pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+        borderWidth: 1
+      },
+      {
+        label: "Indoor Max",
+        data: indoorMax,
+        borderColor: "#0ea5e9",
+        tension: 0,
+        pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+        borderWidth: 1
+      },
+      {
+        label: "Outdoor Min",
+        data: outdoorMin,
+        borderColor: "#a78bfa",
+        tension: 0,
+        pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+        borderWidth: 1
+      },
+      {
+        label: "Outdoor Max",
+        data: outdoorMax,
+        borderColor: "#7c3aed",
+        tension: 0,
+        pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+        borderWidth: 1
+      }
+    ];
+  } else {
+    tempChart.data.datasets = [
+      {
+        label: "Indoor",
+        data: indoorTemps,
+        borderColor: "#38bdf8",
+        backgroundColor: "rgba(56,189,248,0.12)",
+        tension: 0,
+        spanGaps: false,
+        showLine: true,
+        pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+        pointHoverRadius: 6,
+        borderWidth: 1
+      },
+      {
+        label: "Outdoor",
+        data: outdoorTemps,
+        borderColor: "#a78bfa",
+        backgroundColor: "rgba(167,139,250,0.12)",
+        tension: 0,
+        spanGaps: false,
+        showLine: true,
+        pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+        pointHoverRadius: 6,
+        borderWidth: 1
+      }
+    ];
+  }
 
   tempChart.options.plugins.leftDateStamp = { range: historyRange, firstTs };
   tempChart.options.scales.x.ticks.callback = xAxis.tickCallback;
@@ -910,55 +1290,114 @@ function renderHumidityChart(historyData) {
 
   const xAxis = buildXAxis(dataArr, historyRange);
   const labels = xAxis.labels;
-
-  const indoorHum = dataArr.map(p =>
-    (typeof p?.weather?.hum === "number") ? p.weather.hum : null
-  );
-
-  // ---------------------------------------------------------------------------
-  // OUTDOOR HUMIDITY SERIES (history)
-  // ---------------------------------------------------------------------------
-  const outdoorHum = dataArr.map(p =>
-    (typeof p?.weather?.shelly?.humidity_pct === "number")
-      ? p.weather.shelly.humidity_pct
-      : null
-  );
-
   const firstTs = dataArr.length > 0 ? dataArr[0].ts : null;
+
+  /* ------------------------------------------------------------
+   * DATA SELECTION
+   * - 1y  → aggregated min/max fields
+   * - else → raw fields
+   * ------------------------------------------------------------ */
+  let indoorHum, outdoorHum;
+  let indoorHumMin, indoorHumMax, outdoorHumMin, outdoorHumMax;
+
+  if (historyRange === "1y") {
+
+    indoorHumMin = dataArr.map(p => p.hum_in_min ?? null);
+    indoorHumMax = dataArr.map(p => p.hum_in_max ?? null);
+
+    outdoorHumMin = dataArr.map(p => p.hum_out_min ?? null);
+    outdoorHumMax = dataArr.map(p => p.hum_out_max ?? null);
+
+  } else {
+
+    indoorHum = dataArr.map(p =>
+      (typeof p?.weather?.hum === "number") ? p.weather.hum : null
+    );
+
+    // ---------------------------------------------------------------------------
+    // OUTDOOR HUMIDITY SERIES (history)
+    // ---------------------------------------------------------------------------
+    outdoorHum = dataArr.map(p =>
+      (typeof p?.weather?.shelly?.humidity_pct === "number")
+        ? p.weather.shelly.humidity_pct
+        : null
+    );
+  }
+
+  /* ------------------------------------------------------------------
+   * Build datasets once so BOTH create path and update path use
+   * exactly the same dataset structure.
+   * ------------------------------------------------------------------ */
+  const datasets = (historyRange === "1y") ? [
+
+    {
+      label: "Indoor Min",
+      data: indoorHumMin,
+      borderColor: "#34d399",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Indoor Max",
+      data: indoorHumMax,
+      borderColor: "#059669",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Outdoor Min",
+      data: outdoorHumMin,
+      borderColor: "#fbbf24",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Outdoor Max",
+      data: outdoorHumMax,
+      borderColor: "#d97706",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    }
+
+  ] : [
+
+    {
+      label: "Indoor",
+      data: indoorHum,
+      borderColor: "#34d399",
+      backgroundColor: "rgba(52,211,153,0.12)",
+      tension: 0,
+      spanGaps: false,
+      showLine: true,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      pointHoverRadius: 6,
+      borderWidth: 1
+    },
+    {
+      label: "Outdoor",
+      data: outdoorHum,
+      borderColor: "#fbbf24",
+      backgroundColor: "rgba(251,191,36,0.12)",
+      tension: 0,
+      spanGaps: false,
+      showLine: true,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      pointHoverRadius: 6,
+      borderWidth: 1
+    }
+
+  ];
 
   if (!humidityChart) {
     humidityChart = new Chart(canvas, {
       type: "line",
       data: {
         labels,
-        datasets: [
-          {
-            label: "Indoor",
-            data: indoorHum,
-            borderColor: "#34d399",
-            backgroundColor: "rgba(52,211,153,0.12)",
-            tension: 0,
-            spanGaps: false,
-            showLine: true,
-			// Show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
-			pointHoverRadius: 6,
-            borderWidth: 1
-          },
-          {
-            label: "Outdoor",
-            data: outdoorHum,
-            borderColor: "#fbbf24",
-            backgroundColor: "rgba(251,191,36,0.12)",
-            tension: 0,
-            spanGaps: false,
-            showLine: true,
-            // Show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
-            pointHoverRadius: 6,
-            borderWidth: 1
-          }
-        ]
+        datasets
       },
       options: {
         responsive: true,
@@ -1015,9 +1454,12 @@ function renderHumidityChart(historyData) {
     return;
   }
 
+  /* ------------------------------------------------------------------
+   * UPDATE EXISTING CHART INSTANCE
+   * - Needed because 1y uses 4 datasets, others use 2
+   * ------------------------------------------------------------------ */
   humidityChart.data.labels = labels;
-  humidityChart.data.datasets[0].data = indoorHum;
-  humidityChart.data.datasets[1].data = outdoorHum;
+  humidityChart.data.datasets = datasets;
 
   humidityChart.options.plugins.leftDateStamp = { range: historyRange, firstTs, singleLine: false };
   humidityChart.options.scales.x.ticks.callback = xAxis.tickCallback;
@@ -1046,35 +1488,82 @@ function renderPressureChart(historyData) {
 
   const xAxis = buildXAxis(dataArr, historyRange);
   const labels = xAxis.labels;
-
-  const pressure = dataArr.map(p =>
-    (typeof p?.weather?.pressure === "number")
-      ? p.weather.pressure / 100   // Pa → hPa
-      : null
-  );
-
   const firstTs = dataArr.length > 0 ? dataArr[0].ts : null;
+
+  /* ------------------------------------------------------------
+   * DATA SELECTION
+   * - 1y  → aggregated min/max fields
+   * - else → raw pressure field
+   * ------------------------------------------------------------ */
+  let pressure;
+  let pressureMin, pressureMax;
+
+  if (historyRange === "1y") {
+
+    // Aggregated values are still stored in Pa, so convert to hPa here
+    pressureMin = dataArr.map(p =>
+      (typeof p?.press_min === "number") ? (p.press_min / 100) : null
+    );
+
+    pressureMax = dataArr.map(p =>
+      (typeof p?.press_max === "number") ? (p.press_max / 100) : null
+    );
+
+  } else {
+
+    pressure = dataArr.map(p =>
+      (typeof p?.weather?.pressure === "number")
+        ? (p.weather.pressure / 100)   // Pa → hPa
+        : null
+    );
+  }
+
+  /* ------------------------------------------------------------------
+   * Build datasets once so BOTH create path and update path use
+   * exactly the same dataset structure.
+   * ------------------------------------------------------------------ */
+  const datasets = (historyRange === "1y") ? [
+
+    {
+      label: "Min",
+      data: pressureMin,
+      borderColor: "#60a5fa",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    },
+    {
+      label: "Max",
+      data: pressureMax,
+      borderColor: "#1d4ed8",
+      tension: 0,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      borderWidth: 1
+    }
+
+  ] : [
+
+    {
+      label: "Sea‑level Pressure",
+      data: pressure,
+      borderColor: "#60a5fa",
+      backgroundColor: "rgba(96,165,250,0.12)",
+      tension: 0,
+      spanGaps: false,
+      showLine: true,
+      pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
+      pointHoverRadius: 6,
+      borderWidth: 1
+    }
+
+  ];
 
   if (!pressureChart) {
     pressureChart = new Chart(canvas, {
       type: "line",
       data: {
         labels,
-        datasets: [
-          {
-            label: "Sea‑level Pressure",
-            data: pressure,
-            borderColor: "#60a5fa",
-            backgroundColor: "rgba(96,165,250,0.12)",
-            tension: 0,
-            spanGaps: false,
-            showLine: true, 
-			// Show a dot for real samples, hide points for nulls
-			pointRadius: (ctx) => (ctx.raw == null ? 0 : 0),
-            pointHoverRadius: 6,
-            borderWidth: 1
-          }
-        ]
+        datasets
       },
       options: {
         responsive: true,
@@ -1131,8 +1620,12 @@ function renderPressureChart(historyData) {
     return;
   }
 
+  /* ------------------------------------------------------------------
+   * UPDATE EXISTING CHART INSTANCE
+   * - Needed because 1y uses 2 datasets, others use 1
+   * ------------------------------------------------------------------ */
   pressureChart.data.labels = labels;
-  pressureChart.data.datasets[0].data = pressure;
+  pressureChart.data.datasets = datasets;
 
   pressureChart.options.plugins.leftDateStamp = { range: historyRange, firstTs, singleLine: true };
   pressureChart.options.scales.x.ticks.callback = xAxis.tickCallback;
