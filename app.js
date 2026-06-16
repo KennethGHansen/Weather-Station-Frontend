@@ -29,6 +29,26 @@ window.__getWeatherDataMode = () =>
     localStorage.getItem(KEY) || DEFAULT_MODE;
 })();
 
+// ------------------------------------------------------------
+// ISO week number helper
+// ------------------------------------------------------------
+function getISOWeek(date) {
+  const target = new Date(date.getTime());
+  target.setHours(0, 0, 0, 0);
+
+  // move to Thursday (ISO rule)
+  target.setDate(target.getDate() + 3 - (target.getDay() + 6) % 7);
+
+  const firstThursday = new Date(target.getFullYear(), 0, 4);
+  firstThursday.setDate(firstThursday.getDate() + 3 - (firstThursday.getDay() + 6) % 7);
+
+  const weekNumber = 1 + Math.round(
+    (target - firstThursday) / (7 * 24 * 60 * 60 * 1000)
+  );
+
+  return { year: target.getFullYear(), week: weekNumber };
+}
+
 /* ============================================================================
  * Load history snapshot (idempotent; used by controlled polling)
  * ============================================================================
@@ -218,16 +238,10 @@ function buildXAxis(historyData, range) {
   }
 
   /* ------------------------------------------------------------
-   * 1y: show labels only at month changes
-   * - one point per day is already prepared by aggregateDailyMinMax()
-   * - label only when month differs from previous point
+   * 1y: show labels at month change (weekly-safe)
    * ------------------------------------------------------------ */
   if (range === "1y") {
     const labels = historyData.map((p, i, arr) => {
-
-      // ------------------------------------------------------------
-      // Force timezone = Europe/Copenhagen for month logic
-      // ------------------------------------------------------------
       const d = new Date(p.ts * 1000);
 
       const parts = new Intl.DateTimeFormat("en-CA", {
@@ -236,10 +250,9 @@ function buildXAxis(historyData, range) {
         month: "2-digit"
       }).formatToParts(d);
 
-      const month = parts.find(p => p.type === "month").value;
-      const year  = parts.find(p => p.type === "year").value;
+      const month = parts.find(part => part.type === "month").value;
+      const year  = parts.find(part => part.type === "year").value;
 
-      // First point always shows label
       if (i === 0) {
         return new Intl.DateTimeFormat("en-GB", {
           timeZone: "Europe/Copenhagen",
@@ -247,7 +260,6 @@ function buildXAxis(historyData, range) {
         }).format(d);
       }
 
-      // Previous point
       const prev = new Date(arr[i - 1].ts * 1000);
 
       const prevParts = new Intl.DateTimeFormat("en-CA", {
@@ -256,12 +268,10 @@ function buildXAxis(historyData, range) {
         month: "2-digit"
       }).formatToParts(prev);
 
-      const prevMonth = prevParts.find(p => p.type === "month").value;
-      const prevYear  = prevParts.find(p => p.type === "year").value;
+      const prevMonth = prevParts.find(part => part.type === "month").value;
+      const prevYear  = prevParts.find(part => part.type === "year").value;
 
-      // Label only when month changes (Copenhagen time)
-      const monthChanged =
-        month !== prevMonth || year !== prevYear;
+      const monthChanged = (month !== prevMonth) || (year !== prevYear);
 
       return monthChanged
         ? new Intl.DateTimeFormat("en-GB", {
@@ -708,24 +718,55 @@ const historyPage  = document.getElementById("history-page");    // history plac
  * - pure transformation layer
  * ============================================================================
  */
+/* ============================================================================
+ * 1 YEAR WEEKLY AGGREGATION (frontend)
+ * ============================================================================
+ * 
+ * INPUT:
+ * - hourly samples from backend (range = "1y")
+ *
+ * OUTPUT:
+ * - one sample per week
+ * - each week contains min/max values
+ *
+ * RULES:
+ * - ignore null values
+ * - group by Europe/Copenhagen calendar week
+ * - exclude the CURRENT (incomplete) week
+ * - no backend dependency
+ * - pure transformation layer
+ *
+ * NOTE:
+ * - Function NAME is intentionally kept as aggregateDailyMinMax()
+ *   so we do NOT touch already-working callers elsewhere.
+ * ============================================================================
+ */
 function aggregateDailyMinMax(historyData) {
-  const days = new Map();
+  const weeks = new Map();
 
   // ------------------------------------------------------------
-  // Determine "today" in local browser time
-  // We will EXCLUDE all samples from the current day
+  // Determine CURRENT Copenhagen week
+  // We will EXCLUDE all samples from the current (incomplete) week
   // ------------------------------------------------------------
+  const now = new Date();
+
   const nowParts = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Europe/Copenhagen",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit"
-  }).formatToParts(new Date());
+    timeZone: "Europe/Copenhagen",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(now);
 
-const todayKey =
-  nowParts.find(p => p.type === "year").value + "-" +
-  nowParts.find(p => p.type === "month").value + "-" +
-  nowParts.find(p => p.type === "day").value;
+  const nowYear  = Number(nowParts.find(p => p.type === "year").value);
+  const nowMonth = Number(nowParts.find(p => p.type === "month").value);
+  const nowDay   = Number(nowParts.find(p => p.type === "day").value);
+
+  // Build a Copenhagen-local date at local noon to avoid DST edge issues
+  const nowLocalForWeek = new Date(nowYear, nowMonth - 1, nowDay, 12, 0, 0, 0);
+  const nowIsoWeek = getISOWeek(nowLocalForWeek);
+
+  const currentWeekKey =
+    String(nowIsoWeek.year) + "-W" + String(nowIsoWeek.week).padStart(2, "0");
 
   for (const p of historyData) {
     const ts = p?.ts;
@@ -743,19 +784,28 @@ const todayKey =
       day: "2-digit"
     }).formatToParts(d);
 
-    // Build YYYY-MM-DD safely from parts
+    const y = Number(parts.find(p => p.type === "year").value);
+    const m = Number(parts.find(p => p.type === "month").value);
+    const dayOfMonth = Number(parts.find(p => p.type === "day").value);
+
+    // ------------------------------------------------------------
+    // Build a Copenhagen-local date at local noon
+    // - Reuses the already-correct Copenhagen date parts
+    // - Avoids using raw browser timezone date for grouping
+    // ------------------------------------------------------------
+    const localForWeek = new Date(y, m - 1, dayOfMonth, 12, 0, 0, 0);
+    const isoWeek = getISOWeek(localForWeek);
+
     const key =
-      parts.find(p => p.type === "year").value + "-" +
-      parts.find(p => p.type === "month").value + "-" +
-      parts.find(p => p.type === "day").value;
+      String(isoWeek.year) + "-W" + String(isoWeek.week).padStart(2, "0");
 
     // ------------------------------------------------------------
-    // EXCLUDE current (incomplete) day
+    // EXCLUDE current (incomplete) week
     // ------------------------------------------------------------
-    if (key === todayKey) continue;
+    if (key === currentWeekKey) continue;
 
-    if (!days.has(key)) {
-      days.set(key, {
+    if (!weeks.has(key)) {
+      weeks.set(key, {
         ts: ts, // first occurrence (will be overwritten later)
 
         temp_in_min: null,
@@ -773,47 +823,47 @@ const todayKey =
       });
     }
 
-    const day = days.get(key);
+    const week = weeks.get(key);
 
-    // Always update ts so it ends up as LAST sample of the day
-    day.ts = ts;
+    // Always update ts so it ends up as LAST sample of the week
+    week.ts = ts;
 
     // ------------------ TEMPERATURE ------------------
     const tin = p?.weather?.temp;
     if (typeof tin === "number") {
-      if (day.temp_in_min === null || tin < day.temp_in_min) day.temp_in_min = tin;
-      if (day.temp_in_max === null || tin > day.temp_in_max) day.temp_in_max = tin;
+      if (week.temp_in_min === null || tin < week.temp_in_min) week.temp_in_min = tin;
+      if (week.temp_in_max === null || tin > week.temp_in_max) week.temp_in_max = tin;
     }
 
     const tout = p?.weather?.shelly?.temperature_c;
     if (typeof tout === "number") {
-      if (day.temp_out_min === null || tout < day.temp_out_min) day.temp_out_min = tout;
-      if (day.temp_out_max === null || tout > day.temp_out_max) day.temp_out_max = tout;
+      if (week.temp_out_min === null || tout < week.temp_out_min) week.temp_out_min = tout;
+      if (week.temp_out_max === null || tout > week.temp_out_max) week.temp_out_max = tout;
     }
 
     // ------------------ HUMIDITY ------------------
     const hin = p?.weather?.hum;
     if (typeof hin === "number") {
-      if (day.hum_in_min === null || hin < day.hum_in_min) day.hum_in_min = hin;
-      if (day.hum_in_max === null || hin > day.hum_in_max) day.hum_in_max = hin;
+      if (week.hum_in_min === null || hin < week.hum_in_min) week.hum_in_min = hin;
+      if (week.hum_in_max === null || hin > week.hum_in_max) week.hum_in_max = hin;
     }
 
     const hout = p?.weather?.shelly?.humidity_pct;
     if (typeof hout === "number") {
-      if (day.hum_out_min === null || hout < day.hum_out_min) day.hum_out_min = hout;
-      if (day.hum_out_max === null || hout > day.hum_out_max) day.hum_out_max = hout;
+      if (week.hum_out_min === null || hout < week.hum_out_min) week.hum_out_min = hout;
+      if (week.hum_out_max === null || hout > week.hum_out_max) week.hum_out_max = hout;
     }
 
     // ------------------ PRESSURE ------------------
     const pval = p?.weather?.pressure;
     if (typeof pval === "number") {
-      if (day.press_min === null || pval < day.press_min) day.press_min = pval;
-      if (day.press_max === null || pval > day.press_max) day.press_max = pval;
+      if (week.press_min === null || pval < week.press_min) week.press_min = pval;
+      if (week.press_max === null || pval > week.press_max) week.press_max = pval;
     }
   }
 
   // Convert map → sorted array (by ts)
-  return Array.from(days.values())
+  return Array.from(weeks.values())
     .sort((a, b) => a.ts - b.ts);
 }
 
